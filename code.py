@@ -1,27 +1,38 @@
-"""
-John Park & William Chesher
-Lightsaber Code – Version 4.0 TITANIUM EDITION + PREMIUM AUDIO
-© 2025
-
-BULLETPROOF FEATURES:
-- Fixed critical acceleration magnitude calculation
-- Proper file handle management with cleanup
-- Non-blocking audio operations
-- Robust error handling with logging
-- Memory management with cache limits
-- Validated state machine transitions
-- Optimized performance and resource usage
-- Touch debouncing
-- Health monitoring and diagnostics
-
-PREMIUM AUDIO FEATURES:
-- Software volume control (0-100%)
-- Smooth cross-fading between clips
-- Click/pop prevention
-- Volume adjustment via touch gestures
-- Multiple volume presets
-- Audio quality optimization
-"""
+# SPDX-FileCopyrightText: 2021 John Park for Adafruit Industries
+# SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
+# SPDX-License-Identifier: MIT
+#
+# swingsaber v1.0
+# Based on: https://learn.adafruit.com/hallowing-lightsaber
+# CircuitPython 10.x
+# ====================================================
+#
+# Interactive lightsaber controller with motion detection and themed audio.
+# Originally by John Park, refactored and enhanced for reliability.
+#
+# Hardware: Adafruit HalloWing M4 Express
+#  - ATSAMD51 Cortex M4 processor
+#  - MSA311 3-axis accelerometer
+#  - 1.44" 128x128 TFT display
+#  - Built-in amplifier + speaker connection
+#  - 4x capacitive touch pads
+#  - NeoPixel connector (30 pixels)
+#  - LiPo battery connector
+#
+# Features:
+#  - Motion detection: swing & hit detection via accelerometer
+#  - LED effects: 30-pixel NeoPixel blade animations
+#  - Audio system: 4 complete themes
+#  - Touch controls: power, theme switch, battery status
+#  - State machine: validated transitions, error handling
+#  - Memory management: LRU cache, garbage collection
+#  - Power saving: adaptive brightness, idle mode, battery monitoring
+#
+# Prerequisites:
+#  - CircuitPython 10.x on HalloWing M4
+#  - Libraries: adafruit_msa3xx, neopixel, adafruit_display_text
+#  - Sound files in /sounds/ folder (22050Hz, 16-bit, mono WAV)
+#  - Optional: theme logos in /images/ folder (BMP format)
 
 import time
 import gc
