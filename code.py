@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
 # SPDX-License-Identifier: MIT
 #
-# swingsaber v1.0
+# SwingSaber v1.0
 # Based on: https://learn.adafruit.com/hallowing-lightsaber
 # CircuitPython 10.x
 # ====================================================

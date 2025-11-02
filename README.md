@@ -1,4 +1,4 @@
-# swingsaber v1.0
+# SwingSaber v1.0
 
 **Interactive lightsaber controller for Adafruit HalloWing M4 Express**
 
@@ -239,7 +239,7 @@ class SaberConfig:
 ## Project Structure
 
 ```
-swingsaber/
+SwingSaber/
 ├── code.py                        # Main code (1355 lines)
 ├── LICENSE                        # MIT License
 ├── README.md                      # This file
@@ -307,7 +307,7 @@ Copyright (c) 2024-2025 William C. Chesher
 1. Check troubleshooting section above
 2. Connect to serial console for detailed errors
 3. See original guide: https://learn.adafruit.com/hallowing-lightsaber
-4. Open issue: https://github.com/wchesher/swingsaber/issues
+4. Open issue: https://github.com/wchesher/SwingSaber/issues
 
 ---
 
