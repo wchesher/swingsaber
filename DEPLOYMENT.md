@@ -1,6 +1,6 @@
 # Deployment Checklist
 
-Complete deployment guide for swingsaber v1.0
+Complete deployment guide for SwingSaber v1.0
 
 ---
 
@@ -288,7 +288,7 @@ If you encounter issues:
 1. Check troubleshooting section above
 2. Review serial console output
 3. See original guide: https://learn.adafruit.com/hallowing-lightsaber
-4. Open issue: https://github.com/wchesher/swingsaber/issues
+4. Open issue: https://github.com/wchesher/SwingSaber/issues
 
 ---
 
