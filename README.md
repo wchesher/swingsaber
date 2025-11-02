@@ -1,10 +1,9 @@
-# HalloWing M4 Lightsaber v4.0
+# HalloWing M4 Lightsaber v1.0
 
-**Production-grade lightsaber controller for Adafruit HalloWing M4 Express**
+**Interactive lightsaber controller for Adafruit HalloWing M4 Express**
 
-![CircuitPython](https://img.shields.io/badge/CircuitPython-7.x--9.x-blueviolet.svg)
-![Version](https://img.shields.io/badge/version-4.0-green.svg)
-![Status](https://img.shields.io/badge/status-production-brightgreen.svg)
+![CircuitPython](https://img.shields.io/badge/CircuitPython-10.x-blueviolet.svg)
+![Version](https://img.shields.io/badge/version-1.0-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 **Originally by:** [John Park (Adafruit Industries)](https://learn.adafruit.com/hallowing-lightsaber)
@@ -19,8 +18,8 @@ An interactive lightsaber controller that turns the HalloWing M4 into a fully-fu
 - **Motion Detection**: Swing and hit detection via 3-axis accelerometer
 - **LED Blade**: 30-pixel NeoPixel strip with color animations
 - **Sound System**: 4 complete themes with PWM audio
-- **Touch Controls**: Power, theme switching, battery/volume
-- **Bulletproof**: Production-grade error handling and resource management
+- **Touch Controls**: Power, theme switching, battery status
+- **Reliable**: Error handling and resource management
 
 Based on the [Adafruit HalloWing Lightsaber guide](https://learn.adafruit.com/hallowing-lightsaber) by John Park.
 
@@ -48,12 +47,12 @@ Based on the [Adafruit HalloWing Lightsaber guide](https://learn.adafruit.com/ha
 
 #### 1. Install CircuitPython
 
-Download and install CircuitPython 7.x, 8.x, or 9.x on your HalloWing M4:
+Download and install CircuitPython 10.x on your HalloWing M4:
 - [CircuitPython for HalloWing M4](https://circuitpython.org/board/hallowing_m4_express/)
 
 #### 2. Install Required Libraries
 
-Download the [CircuitPython Library Bundle](https://circuitpython.org/libraries) matching your CircuitPython version.
+Download the [CircuitPython 10.x Library Bundle](https://circuitpython.org/libraries).
 
 Copy these libraries to `/lib/` on your `CIRCUITPY` drive:
 - `adafruit_msa3xx.mpy`
@@ -93,8 +92,6 @@ Repeat for themes 1, 2, and 3 (24 files total).
 - Bit depth: 16-bit signed
 - Channels: Mono
 
-**Need help optimizing audio?** See `README_AUDIO.md`
-
 #### 5. Add Theme Images (Optional)
 
 Create an `/images/` folder and add BMP files:
@@ -125,10 +122,7 @@ CIRCUITPY/
 | **RIGHT (D4)** | Tap | Power lightsaber ON/OFF |
 | **LEFT (D3)** | Tap (OFF) | Cycle theme |
 | **LEFT (D3)** | Tap (ON) | Power off, then cycle theme |
-| **LEFT (D3)** | Hold 1s | Cycle volume preset |
 | **A3/A4** | Tap | Show battery status |
-| **A3** | Hold 1s | Increase volume |
-| **A4** | Hold 1s | Decrease volume |
 
 ### Themes
 
@@ -147,38 +141,39 @@ CIRCUITPY/
 
 ## Features
 
-### v4.0 Titanium Edition
+✅ **Motion & LED System**
+- 3-axis accelerometer motion detection
+- 30-pixel NeoPixel blade animations
+- Power on/off animations
+- Color blending during effects
+- Adaptive brightness (idle vs. active)
 
-✅ **Bulletproof Reliability**
-- Fixed critical acceleration bug (3D magnitude)
-- Proper file handle management (no leaks)
-- Non-blocking audio fade
-- Comprehensive error handling
-- State machine validation
-- Memory management (LRU cache, GC)
+✅ **Audio System**
+- 4 complete themes
+- Power on/off sounds
+- Looping idle hum
+- Swing and clash sounds
+- Theme switch confirmation
 
-✅ **Premium Audio System**
-- Software volume control (10-100%)
-- Volume presets & gestures
-- Crossfade support (50ms)
-- Click/pop prevention
-- Audio optimization tools
-- Hardware upgrade guides
+✅ **Touch Interface**
+- Power on/off
+- Theme switching
+- Battery status display
+- Debounced inputs
 
 ✅ **Power Management**
 - Battery monitoring
-- Adaptive brightness
-- Idle mode (50ms loop delay)
+- USB detection
+- Adaptive loop delays
 - Display timeout
-- Periodic garbage collection
+- Power saving modes
 
-✅ **Production Quality**
-- 1355 lines of code
-- 20+ error handlers
-- 43 named constants
-- Comprehensive documentation
+✅ **Reliability**
+- Error handling
+- State machine validation
+- Memory management
+- Resource cleanup
 - Diagnostic logging
-- Hardware status reporting
 
 ---
 
@@ -190,7 +185,6 @@ Edit `code.py` to customize:
 class UserConfig:
     DISPLAY_BRIGHTNESS = 0.3        # Display brightness
     NEOPIXEL_ACTIVE_BRIGHTNESS = 0.3 # LED brightness
-    DEFAULT_VOLUME = 70             # Audio volume (10-100%)
     ENABLE_DIAGNOSTICS = True       # Serial debug output
 
 class SaberConfig:
@@ -209,57 +203,36 @@ class SaberConfig:
 
 ---
 
-## Audio Optimization
-
-### Quick Audio Setup
-
-```bash
-# Install dependencies
-pip install pydub numpy
-
-# Optimize audio files (creates 3 volume levels)
-python audio_processor.py sounds/ --all --volumes 30 60 100
-```
-
-**Result:** Clean, consistent audio with no clicks/pops
-
-### Volume Control Options
-
-| Method | Cost | Real-time | Quality |
-|--------|------|-----------|---------|
-| **File-based** (current) | Free | ❌ | ⭐⭐⭐⭐ |
-| **Hardware pot** | $2 | ✅ | ⭐⭐⭐⭐⭐ |
-| **I2S DAC** | $7 | ✅ | ⭐⭐⭐⭐⭐ |
-
-See `README_AUDIO.md` and `AUDIO_OPTIMIZATION_GUIDE.md` for complete details.
-
----
-
 ## Troubleshooting
 
-**No motion detection?**
+### Device Won't Boot
+- Check battery charge
+- Try USB power instead
+- Verify CircuitPython 10.x installed correctly
+- Boot into safe mode (hold button during power on)
+- Check serial console for errors
+
+### No Motion Detection
 - Check serial console for "Accelerometer OK"
 - Lower thresholds (try SWING_THRESHOLD = 80)
 - Verify MSA311 library installed
 
-**No audio?**
+### No Audio
 - Verify sound files in `/sounds/` folder
 - Check format: 22050Hz, 16-bit, mono WAV
-- Run `python audio_processor.py sounds/ --all`
 - Verify speaker connections
+- Check serial console for errors
 
-**LEDs wrong color?**
+### LEDs Not Working
 - Verify `NUM_PIXELS = 30` matches your strip
-- Try changing `pixel_order=neopixel.RGB` in code
-- Check NeoPixel power (needs 5V)
+- Check NeoPixel connector is plugged in
+- Try changing `pixel_order` in code (GRB vs RGB)
+- Ensure adequate power (5V, ~500mA for 30 pixels)
 
-**Volume doesn't change?**
-- This is expected! PWM audio has no native volume control
-- Process audio files: `python audio_processor.py sounds/ --all --volumes 30 60 100`
-- Update code to load volume-specific files (see README_AUDIO.md)
-- Or add hardware potentiometer ($2)
-
-See comprehensive troubleshooting in main README.
+### Battery Percentage Wrong
+- Check `BATTERY_MIN_VOLTAGE` and `BATTERY_MAX_VOLTAGE` in code
+- Verify voltage divider matches your board
+- Some boards don't have battery monitoring
 
 ---
 
@@ -267,13 +240,10 @@ See comprehensive troubleshooting in main README.
 
 ```
 swingsaber/
-├── code.py                        # Main firmware (1355 lines)
+├── code.py                        # Main code (1355 lines)
 ├── LICENSE                        # MIT License
 ├── README.md                      # This file
 ├── DEPLOYMENT.md                  # Deployment checklist
-├── README_AUDIO.md                # Audio quick reference
-├── AUDIO_OPTIMIZATION_GUIDE.md    # Complete audio guide
-├── audio_processor.py             # Audio optimization tool
 │
 ├── sounds/                        # User-provided WAV files
 │   ├── 0on.wav                    # Theme 0 power on
@@ -295,35 +265,20 @@ swingsaber/
 
 ## Version History
 
-### v4.0 Titanium Edition + Premium Audio (2025-01-02)
-- Premium audio system with volume control
-- Audio processor tool for optimization
-- Comprehensive audio documentation
-- Hardware upgrade recommendations
-
-### v3.0 Titanium Edition (2025-01-02)
-- Fixed critical acceleration bug
-- Bulletproof error handling
-- Memory management (LRU cache, GC)
-- State machine validation
-- Performance optimizations
-
-### v2.0 (2024-12-30)
-- Original enhancements by William C. Chesher
+### v1.0 (2025-01-02)
+- Initial stable release
 - 4 theme support
-- Enhanced touch controls
+- Motion detection (swing/hit)
+- Touch controls
 - Battery monitoring
-
-### v1.0
-- Original by John Park / Phillip Burgess
-- Basic lightsaber functionality
+- Error handling & resource management
 
 ---
 
 ## Credits
 
 **Original Code:** [John Park / Phillip Burgess (Adafruit Industries)](https://learn.adafruit.com/hallowing-lightsaber)
-**v3.0-v4.0 Enhancements:** William C. Chesher
+**v1.0 Enhancements:** William C. Chesher
 **CircuitPython:** Adafruit Industries and contributors
 
 ---

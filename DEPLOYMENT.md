@@ -1,6 +1,6 @@
 # Deployment Checklist
 
-Complete deployment guide for HalloWing M4 Lightsaber v4.0
+Complete deployment guide for HalloWing M4 Lightsaber v1.0
 
 ---
 
@@ -13,15 +13,11 @@ Complete deployment guide for HalloWing M4 Lightsaber v4.0
 - [ ] LiPo Battery (3.7V, 500mAh or larger)
 - [ ] USB-C cable
 
-### Software
-- [ ] Python 3.7+ installed on computer
-- [ ] Git installed (optional, for cloning repo)
-
 ---
 
 ## Step 1: Install CircuitPython
 
-- [ ] Download CircuitPython 7.x, 8.x, or 9.x from https://circuitpython.org/board/hallowing_m4_express/
+- [ ] Download CircuitPython 10.x from https://circuitpython.org/board/hallowing_m4_express/
 - [ ] Connect HalloWing M4 via USB
 - [ ] Double-click reset button to enter bootloader mode
   - Board appears as `HALOBOOT` drive
@@ -33,7 +29,7 @@ Complete deployment guide for HalloWing M4 Lightsaber v4.0
 
 ## Step 2: Install Libraries
 
-- [ ] Download CircuitPython Library Bundle matching your CP version from https://circuitpython.org/libraries
+- [ ] Download CircuitPython 10.x Library Bundle from https://circuitpython.org/libraries
 - [ ] Extract library bundle ZIP file
 - [ ] Create `/lib/` folder on `CIRCUITPY` drive (if it doesn't exist)
 - [ ] Copy required libraries to `/lib/`:
@@ -78,21 +74,14 @@ Hardware init complete.
 Status: {'strip': True, 'touch': True, 'accel': True, 'battery': True}
 
 Audio system OK.
-  Audio volume: 70%
 SaberController init complete.
 
 === SABER READY ===
-Volume Controls:
-  - Long press A3: Increase volume
-  - Long press A4: Decrease volume
-  - Long press LEFT: Cycle volume presets
 ```
 
 ---
 
-## Step 4: Prepare Audio Files
-
-### Option A: Quick Setup (Use Existing Files)
+## Step 4: Add Sound Files
 
 - [ ] Create `/sounds/` folder on `CIRCUITPY` drive
 - [ ] Copy your WAV files (must be 22050Hz, 16-bit, mono)
@@ -112,40 +101,11 @@ CIRCUITPY/
     └── ... (24 files total for 4 themes)
 ```
 
-### Option B: Optimize Audio (Recommended)
-
-- [ ] Install audio processing dependencies:
-  ```bash
-  pip install pydub numpy
-  ```
-- [ ] Install ffmpeg:
-  - Mac: `brew install ffmpeg`
-  - Windows: Download from https://ffmpeg.org/download.html
-  - Linux: `sudo apt-get install ffmpeg`
-
-- [ ] Process audio files:
-  ```bash
-  python audio_processor.py sounds/ --all --volumes 30 60 100
-  ```
-
-- [ ] Copy optimized files to device:
-  ```bash
-  cp sounds/optimized/*.wav /Volumes/CIRCUITPY/sounds/optimized/
-  ```
-
-**Verify audio quality:**
-```bash
-# Check file specifications
-python audio_processor.py sounds/0on.wav --analyze
-```
-
-Expected output:
-```
-Sample Rate:     22050 Hz ✅
-Channels:        1 (Mono) ✅
-Sample Width:    2 bytes (16-bit) ✅
-Max dBFS:        -1.0 dB ✅
-```
+**Audio Requirements:**
+- Format: WAV (uncompressed PCM)
+- Sample rate: 22050 Hz
+- Bit depth: 16-bit signed
+- Channels: Mono (1 channel)
 
 ---
 
@@ -180,11 +140,6 @@ CIRCUITPY/
   - **CAUTION:** Verify polarity! Connector should be keyed
   - Use 500mAh or larger battery
 
-**Optional Hardware Upgrades:**
-- [ ] Add 100µF capacitor in series with speaker (reduces hum)
-- [ ] Add 10KΩ potentiometer for hardware volume control
-- [ ] Install in lightsaber hilt
-
 ---
 
 ## Step 7: Testing
@@ -217,13 +172,6 @@ CIRCUITPY/
 - [ ] Tap A3 or A4 button
 - [ ] Display should show battery percentage or "USB"
 - [ ] Battery bar should display (if on battery)
-
-### Volume Test
-- [ ] Long press (1 second) A3 button
-- [ ] Display should show "VOLUME: 80%" (or current + 10%)
-- [ ] Long press A4 button
-- [ ] Display should show decreased volume
-- [ ] Long press LEFT button to cycle volume presets
 
 ---
 
@@ -273,7 +221,7 @@ class SaberConfig:
 ### Device Won't Boot
 - [ ] Check battery charge
 - [ ] Try USB power instead
-- [ ] Verify CircuitPython installed correctly
+- [ ] Verify CircuitPython 10.x installed correctly
 - [ ] Boot into safe mode (hold button during power on)
 - [ ] Check serial console for errors
 
@@ -285,20 +233,14 @@ class SaberConfig:
 ### No Audio
 - [ ] Verify sound files in `/sounds/` folder
 - [ ] Check file format: 22050Hz, 16-bit, mono
-- [ ] Run audio processor: `python audio_processor.py sounds/ --all`
 - [ ] Verify speaker connections
+- [ ] Check serial console for errors
 
 ### LEDs Not Working
 - [ ] Check `NUM_PIXELS` matches your strip
 - [ ] Verify NeoPixel connector is plugged in
 - [ ] Try changing `pixel_order` in code (GRB vs RGB)
 - [ ] Ensure adequate power (5V, ~500mA for 30 pixels)
-
-### Volume Doesn't Change
-- [ ] **Expected behavior!** PWM audio has no native volume
-- [ ] Process files with audio_processor.py
-- [ ] Update code to load volume-specific files (see README_AUDIO.md)
-- [ ] Or add hardware potentiometer
 
 ---
 
@@ -309,7 +251,6 @@ class SaberConfig:
 - [ ] Audio plays without clicks/pops
 - [ ] LEDs display correct colors
 - [ ] Battery monitoring works
-- [ ] Volume controls display changes
 - [ ] No errors in serial console
 - [ ] Device can run for extended period without crashes
 
@@ -323,19 +264,11 @@ class SaberConfig:
 - [ ] Check memory warnings (< 10KB free)
 - [ ] Watch for accelerometer errors
 
-### Audio Optimization
-If audio has issues:
-- [ ] Run audio processor with diagnostics
-- [ ] Check for clipping (should be < -1dB)
-- [ ] Verify DC offset removed
-- [ ] Ensure fade envelopes applied
-
 ### Hardware Enhancements
 Consider upgrades:
-- [ ] Add output capacitor for cleaner audio
-- [ ] Install hardware potentiometer for volume
-- [ ] Upgrade to I2S DAC for premium audio
 - [ ] Install in custom lightsaber hilt
+- [ ] Add diffuser material for blade
+- [ ] Larger battery for extended runtime
 
 ---
 
@@ -344,8 +277,6 @@ Consider upgrades:
 Refer to these files for detailed information:
 
 - **README.md** - Main documentation
-- **README_AUDIO.md** - Audio quick reference
-- **AUDIO_OPTIMIZATION_GUIDE.md** - Complete audio guide
 - **LICENSE** - MIT License and attribution
 
 ---

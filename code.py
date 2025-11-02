@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
 # SPDX-License-Identifier: MIT
 #
-# HalloWing M4 Lightsaber v4.0 - Titanium Edition
+# HalloWing M4 Lightsaber v1.0
 # Based on: https://learn.adafruit.com/hallowing-lightsaber
-# CircuitPython 7.x - 9.x
+# CircuitPython 10.x
 # ====================================================
 #
-# Production-grade lightsaber controller with motion detection, premium audio,
-# and bulletproof reliability. Originally by John Park, extensively refactored
-# and enhanced for production use.
+# Interactive lightsaber controller with motion detection and themed audio.
+# Originally by John Park, refactored and enhanced for reliability.
 #
 # Hardware: Adafruit HalloWing M4 Express
 #  - ATSAMD51 Cortex M4 processor
@@ -23,24 +22,14 @@
 # Features:
 #  - Motion detection: swing & hit detection via accelerometer
 #  - LED effects: 30-pixel NeoPixel blade animations
-#  - Audio system: 4 complete themes with volume control
-#  - Touch controls: power, theme switch, battery/volume
-#  - State machine: validated transitions, bulletproof error handling
-#  - Memory management: LRU cache, garbage collection, no leaks
+#  - Audio system: 4 complete themes
+#  - Touch controls: power, theme switch, battery status
+#  - State machine: validated transitions, error handling
+#  - Memory management: LRU cache, garbage collection
 #  - Power saving: adaptive brightness, idle mode, battery monitoring
 #
-# Bulletproof Enhancements (v3.0-v4.0):
-#  - Fixed critical acceleration bug (3D magnitude calculation)
-#  - Proper file handle management (no leaks)
-#  - Non-blocking audio operations
-#  - Comprehensive error handling (20+ try/except blocks)
-#  - State machine validation
-#  - Memory management (LRU cache, periodic GC)
-#  - Premium audio system with volume control
-#  - Hardware upgrade documentation
-#
 # Prerequisites:
-#  - CircuitPython 7.x, 8.x, or 9.x on HalloWing M4
+#  - CircuitPython 10.x on HalloWing M4
 #  - Libraries: adafruit_msa3xx, neopixel, adafruit_display_text
 #  - Sound files in /sounds/ folder (22050Hz, 16-bit, mono WAV)
 #  - Optional: theme logos in /images/ folder (BMP format)
