@@ -1,4 +1,4 @@
-# SwingSaber v4.0 Titanium Edition
+# SwingSaber v4.0
 
 **Production-grade lightsaber controller firmware with motion detection, premium audio, and bulletproof reliability for Adafruit CircuitPython hardware.**
 
