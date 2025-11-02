@@ -1,6 +1,6 @@
 # Deployment Checklist
 
-Complete deployment guide for HalloWing M4 Lightsaber v1.0
+Complete deployment guide for swingsaber v1.0
 
 ---
 

@@ -1,4 +1,4 @@
-# HalloWing M4 Lightsaber v1.0
+# swingsaber v1.0
 
 **Interactive lightsaber controller for Adafruit HalloWing M4 Express**
 

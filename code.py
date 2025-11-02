@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2021 Phillip Burgess for Adafruit Industries
+# SPDX-FileCopyrightText: 2021 John Park for Adafruit Industries
 # SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
 # SPDX-License-Identifier: MIT
 #
-# HalloWing M4 Lightsaber v1.0
+# swingsaber v1.0
 # Based on: https://learn.adafruit.com/hallowing-lightsaber
 # CircuitPython 10.x
 # ====================================================
