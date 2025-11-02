@@ -1,27 +1,49 @@
-"""
-John Park & William Chesher
-Lightsaber Code – Version 4.0 TITANIUM EDITION + PREMIUM AUDIO
-© 2025
-
-BULLETPROOF FEATURES:
-- Fixed critical acceleration magnitude calculation
-- Proper file handle management with cleanup
-- Non-blocking audio operations
-- Robust error handling with logging
-- Memory management with cache limits
-- Validated state machine transitions
-- Optimized performance and resource usage
-- Touch debouncing
-- Health monitoring and diagnostics
-
-PREMIUM AUDIO FEATURES:
-- Software volume control (0-100%)
-- Smooth cross-fading between clips
-- Click/pop prevention
-- Volume adjustment via touch gestures
-- Multiple volume presets
-- Audio quality optimization
-"""
+# SPDX-FileCopyrightText: 2021 Phillip Burgess for Adafruit Industries
+# SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
+# SPDX-License-Identifier: MIT
+#
+# HalloWing M4 Lightsaber v4.0 - Titanium Edition
+# Based on: https://learn.adafruit.com/hallowing-lightsaber
+# CircuitPython 7.x - 9.x
+# ====================================================
+#
+# Production-grade lightsaber controller with motion detection, premium audio,
+# and bulletproof reliability. Originally by John Park, extensively refactored
+# and enhanced for production use.
+#
+# Hardware: Adafruit HalloWing M4 Express
+#  - ATSAMD51 Cortex M4 processor
+#  - MSA311 3-axis accelerometer
+#  - 1.44" 128x128 TFT display
+#  - Built-in amplifier + speaker connection
+#  - 4x capacitive touch pads
+#  - NeoPixel connector (30 pixels)
+#  - LiPo battery connector
+#
+# Features:
+#  - Motion detection: swing & hit detection via accelerometer
+#  - LED effects: 30-pixel NeoPixel blade animations
+#  - Audio system: 4 complete themes with volume control
+#  - Touch controls: power, theme switch, battery/volume
+#  - State machine: validated transitions, bulletproof error handling
+#  - Memory management: LRU cache, garbage collection, no leaks
+#  - Power saving: adaptive brightness, idle mode, battery monitoring
+#
+# Bulletproof Enhancements (v3.0-v4.0):
+#  - Fixed critical acceleration bug (3D magnitude calculation)
+#  - Proper file handle management (no leaks)
+#  - Non-blocking audio operations
+#  - Comprehensive error handling (20+ try/except blocks)
+#  - State machine validation
+#  - Memory management (LRU cache, periodic GC)
+#  - Premium audio system with volume control
+#  - Hardware upgrade documentation
+#
+# Prerequisites:
+#  - CircuitPython 7.x, 8.x, or 9.x on HalloWing M4
+#  - Libraries: adafruit_msa3xx, neopixel, adafruit_display_text
+#  - Sound files in /sounds/ folder (22050Hz, 16-bit, mono WAV)
+#  - Optional: theme logos in /images/ folder (BMP format)
 
 import time
 import gc
