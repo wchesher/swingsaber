@@ -133,8 +133,8 @@ class SaberConfig:
     SPEAKER_ENABLE_PIN = board.SPEAKER_ENABLE
     VOLTAGE_MONITOR_PIN = board.VOLTAGE_MONITOR
 
-    # NeoPixel
-    NUM_PIXELS = 30
+    # NeoPixel (Adafruit 4914: RGBW strip, 60 LEDs/m)
+    NUM_PIXELS = 60
 
     # Motion thresholds (magnitude squared to avoid slow sqrt)
     SWING_THRESHOLD = 140
@@ -185,12 +185,13 @@ class SaberConfig:
     FADE_IN_SAMPLES = 100
     FADE_OUT_SAMPLES = 100
 
-    # Themes: name, blade color (RGB), hit/clash color
+    # Themes: name, blade color (RGBW), hit/clash color
+    # RGBW format: (Red, Green, Blue, White) - White channel adds brightness
     THEMES = [
-        {"name": "jedi",       "color": (0, 0, 255),   "hit_color": (255, 255, 255)},
-        {"name": "powerpuff",  "color": (255, 0, 255), "hit_color": (0, 200, 255)},
-        {"name": "ricknmorty", "color": (0, 255, 0),   "hit_color": (255, 0, 0)},
-        {"name": "spongebob",  "color": (255, 255, 0), "hit_color": (255, 255, 255)},
+        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
+        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
+        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0)},
+        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
     ]
 
     IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25%
@@ -366,7 +367,7 @@ class SaberHardware:
                 SaberConfig.NUM_PIXELS,
                 brightness=UserConfig.NEOPIXEL_ACTIVE_BRIGHTNESS,
                 auto_write=False,
-                pixel_order=neopixel.GRB
+                pixel_order=neopixel.GRBW
             )
             strip.fill(0)
             strip.show()
@@ -832,11 +833,11 @@ class SaberController:
         self.audio.set_volume(saved_volume)
         print("  Loaded: theme={}, volume={}%".format(self.theme_index, saved_volume))
 
-        # Color state
-        self.color_idle = (0, 0, 0)
-        self.color_swing = (0, 0, 0)
-        self.color_hit = (0, 0, 0)
-        self.color_active = (0, 0, 0)
+        # Color state (RGBW format)
+        self.color_idle = (0, 0, 0, 0)
+        self.color_swing = (0, 0, 0, 0)
+        self.color_hit = (0, 0, 0, 0)
+        self.color_active = (0, 0, 0, 0)
         self.last_color = None
 
         # Timing
@@ -932,8 +933,9 @@ class SaberController:
             return 0
 
     def _update_theme_colors(self):
-        """Update colors from current theme."""
+        """Update RGBW colors from current theme."""
         theme = SaberConfig.THEMES[self.theme_index]
+        # Dim all 4 RGBW channels for idle color
         self.color_idle = tuple(int(c / SaberConfig.IDLE_COLOR_DIVISOR) for c in theme["color"])
         self.color_swing = theme["color"]
         self.color_hit = theme["hit_color"]
@@ -1286,13 +1288,14 @@ class SaberController:
                 print("Strip blend error:", e)
 
     def _mix_colors(self, color1, color2, w2):
-        """Linear interpolation between two RGB colors."""
+        """Linear interpolation between two RGBW colors."""
         w2 = max(0.0, min(w2, 1.0))
         w1 = 1.0 - w2
         return (
             int(color1[0] * w1 + color2[0] * w2),
             int(color1[1] * w1 + color2[1] * w2),
             int(color1[2] * w1 + color2[2] * w2),
+            int(color1[3] * w1 + color2[3] * w2),
         )
 
     def _update_strip_brightness(self):
@@ -1357,7 +1360,7 @@ class SaberController:
         if self.hw.strip and self.mode == SaberConfig.STATE_OFF:
             try:
                 for _ in range(2):
-                    self.hw.strip.fill((255, 255, 0))
+                    self.hw.strip.fill((255, 255, 0, 0))  # RGBW yellow
                     self.hw.strip.show()
                     time.sleep(0.15)
                     self.hw.strip.fill(0)
@@ -1372,7 +1375,7 @@ class SaberController:
         if self.hw.strip and self.mode == SaberConfig.STATE_OFF:
             try:
                 for _ in range(3):
-                    self.hw.strip.fill((255, 0, 0))
+                    self.hw.strip.fill((255, 0, 0, 0))  # RGBW red
                     self.hw.strip.show()
                     time.sleep(0.1)
                     self.hw.strip.fill(0)
