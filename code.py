@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
 # SPDX-License-Identifier: MIT
 #
-# SwingSaber v1.0
+# SwingSaber v1.1 - Stability & Optimization Update
 # Based on: https://learn.adafruit.com/hallowing-lightsaber
 # CircuitPython 10.x
 # ====================================================
@@ -23,10 +23,14 @@
 #  - Motion detection: swing & hit detection via accelerometer
 #  - LED effects: 30-pixel NeoPixel blade animations
 #  - Audio system: 4 complete themes
-#  - Touch controls: power, theme switch, battery status
+#  - Touch controls: power, theme switch, battery/volume status
 #  - State machine: validated transitions, error handling
-#  - Memory management: LRU cache, garbage collection
+#  - Memory management: LRU cache, critical memory handling, garbage collection
 #  - Power saving: adaptive brightness, idle mode, battery monitoring
+#  - Persistent settings: theme and volume saved across reboots (NVM)
+#  - Watchdog timer: automatic recovery from crashes
+#  - Battery warnings: visual LED alerts for low/critical battery
+#  - Accelerometer recovery: automatic re-initialization after errors
 #
 # Prerequisites:
 #  - CircuitPython 10.x on HalloWing M4
@@ -48,9 +52,17 @@ import analogio
 import supervisor
 import displayio
 import terminalio
+import microcontroller
 from digitalio import DigitalInOut
 from adafruit_display_text import label
 import array
+
+# Optional watchdog support (CircuitPython 7+)
+try:
+    from watchdog import WatchDogMode
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
 
 # =============================================================================
 # (1) USER CONFIG FOR POWER SAVINGS & AUDIO
@@ -97,14 +109,32 @@ class UserConfig:
     # Memory management
     MAX_IMAGE_CACHE_SIZE = 4  # Maximum cached images (LRU eviction)
     GC_INTERVAL = 10.0  # Run garbage collection every 10 seconds in idle
+    CRITICAL_MEMORY_THRESHOLD = 8192  # Force GC when free memory below this
 
     # Health monitoring
     ENABLE_DIAGNOSTICS = True
     BATTERY_CHECK_INTERVAL = 30.0  # Check battery every 30 seconds
 
-    # Error handling
+    # Battery warning settings
+    BATTERY_WARNING_THRESHOLD = 15  # Warn at 15% battery
+    BATTERY_CRITICAL_THRESHOLD = 5   # Critical at 5% battery
+    BATTERY_WARNING_INTERVAL = 60.0  # Only warn once per minute
+
+    # Error handling and recovery
     MAX_ACCEL_ERRORS = 10  # Disable accelerometer after this many consecutive errors
     ERROR_RECOVERY_DELAY = 0.1  # Delay after error before retry
+    ACCEL_RECOVERY_INTERVAL = 30.0  # Try to re-enable accelerometer every 30s
+
+    # Watchdog settings (for crash recovery)
+    ENABLE_WATCHDOG = True
+    WATCHDOG_TIMEOUT = 8.0  # Reset if main loop hangs for 8 seconds
+
+    # Persistent settings (stored in NVM)
+    ENABLE_PERSISTENT_SETTINGS = True
+    NVM_THEME_OFFSET = 0  # Byte offset for theme index
+    NVM_VOLUME_OFFSET = 1  # Byte offset for volume
+    NVM_MAGIC_OFFSET = 2   # Byte offset for magic byte (validates stored data)
+    NVM_MAGIC_VALUE = 0xAB  # Magic byte to validate NVM data
 
 # =============================================================================
 # (2) SABER CONFIG
@@ -252,6 +282,78 @@ class AudioUtils:
         silence = array.array("h", [0] * num_samples)
         return audiocore.RawSample(silence, sample_rate=sample_rate)
 
+
+# =============================================================================
+# (3.5) PERSISTENT SETTINGS UTILITY
+# =============================================================================
+class PersistentSettings:
+    """Manage persistent settings in non-volatile memory (NVM)."""
+
+    @staticmethod
+    def is_valid():
+        """Check if NVM contains valid settings data."""
+        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
+            return False
+        try:
+            return microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] == UserConfig.NVM_MAGIC_VALUE
+        except Exception:
+            return False
+
+    @staticmethod
+    def load_theme():
+        """Load saved theme index from NVM."""
+        if not PersistentSettings.is_valid():
+            return 0
+        try:
+            theme = microcontroller.nvm[UserConfig.NVM_THEME_OFFSET]
+            # Validate theme index
+            if theme < len(SaberConfig.THEMES):
+                return theme
+        except Exception:
+            pass
+        return 0
+
+    @staticmethod
+    def load_volume():
+        """Load saved volume from NVM."""
+        if not PersistentSettings.is_valid():
+            return UserConfig.DEFAULT_VOLUME
+        try:
+            volume = microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET]
+            # Validate volume range
+            if UserConfig.MIN_VOLUME <= volume <= UserConfig.MAX_VOLUME:
+                return volume
+        except Exception:
+            pass
+        return UserConfig.DEFAULT_VOLUME
+
+    @staticmethod
+    def save_theme(theme_index):
+        """Save theme index to NVM."""
+        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
+            return False
+        try:
+            microcontroller.nvm[UserConfig.NVM_THEME_OFFSET] = theme_index
+            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
+            return True
+        except Exception as e:
+            print("Error saving theme:", e)
+            return False
+
+    @staticmethod
+    def save_volume(volume):
+        """Save volume to NVM."""
+        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
+            return False
+        try:
+            microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET] = volume
+            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
+            return True
+        except Exception as e:
+            print("Error saving volume:", e)
+            return False
+
+
 # =============================================================================
 # (4) HARDWARE SETUP
 # =============================================================================
@@ -343,14 +445,40 @@ class SaberHardware:
     def _init_accel(self):
         """Initialize accelerometer with error handling."""
         try:
-            i2c = busio.I2C(board.SCL, board.SDA)
-            accel = adafruit_msa3xx.MSA311(i2c)
+            # Store I2C bus reference to prevent garbage collection
+            self.i2c_bus = busio.I2C(board.SCL, board.SDA)
+            accel = adafruit_msa3xx.MSA311(self.i2c_bus)
             print("  Accelerometer OK.")
             self.hardware_status["accel"] = True
             return accel
         except Exception as e:
             print("  Accel error:", e)
+            self.i2c_bus = None
             return None
+
+    def try_reinit_accel(self):
+        """Attempt to reinitialize the accelerometer after errors."""
+        if self.accel is not None:
+            return True  # Already working
+
+        try:
+            # Clean up old I2C if exists
+            if hasattr(self, 'i2c_bus') and self.i2c_bus is not None:
+                try:
+                    self.i2c_bus.deinit()
+                except Exception:
+                    pass
+
+            # Try to reinitialize
+            self.i2c_bus = busio.I2C(board.SCL, board.SDA)
+            self.accel = adafruit_msa3xx.MSA311(self.i2c_bus)
+            self.hardware_status["accel"] = True
+            self.accel_error_count = 0
+            print("  Accelerometer recovered!")
+            return True
+        except Exception as e:
+            print("  Accel reinit failed:", e)
+            return False
 
     def cleanup(self):
         """Clean up hardware resources."""
@@ -364,6 +492,13 @@ class SaberHardware:
         if self.speaker_enable:
             try:
                 self.speaker_enable.value = False
+            except Exception:
+                pass
+
+        # Clean up I2C bus
+        if hasattr(self, 'i2c_bus') and self.i2c_bus is not None:
+            try:
+                self.i2c_bus.deinit()
             except Exception:
                 pass
 
@@ -724,20 +859,25 @@ class SaberDisplay:
             board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
             self.display_start_time = time.monotonic()
             self.display_active = True
-
-            # Auto-hide after 1 second
-            time.sleep(1.0)
-            self.turn_off_screen()
+            # Note: Display will auto-hide via update_display() - no blocking sleep
         except Exception as e:
             print("Error showing volume status:", e)
 
     def _evict_oldest_image(self):
-        """Remove oldest image from cache (LRU)."""
+        """Remove oldest image from cache (LRU) and release resources."""
         if not self.image_cache_order:
             return
 
         oldest_key = self.image_cache_order.pop(0)
         if oldest_key in self.image_cache:
+            # TileGrid/bitmap may hold file references - explicit cleanup
+            try:
+                tile_grid = self.image_cache[oldest_key]
+                # Note: OnDiskBitmap doesn't require explicit close in CircuitPython
+                # but we ensure proper dereferencing
+                del tile_grid
+            except Exception:
+                pass
             del self.image_cache[oldest_key]
         gc.collect()
 
@@ -833,7 +973,12 @@ class SaberController:
         self.power_saver_mode = False
         self.cpu_loop_delay = UserConfig.ACTIVE_LOOP_DELAY
         self.mode = SaberConfig.STATE_OFF
-        self.theme_index = 0
+
+        # Load persistent settings or use defaults
+        self.theme_index = PersistentSettings.load_theme()
+        saved_volume = PersistentSettings.load_volume()
+        self.audio.set_volume(saved_volume)
+        print("  Loaded settings: theme={}, volume={}%".format(self.theme_index, saved_volume))
 
         # Color state
         self.color_idle = (0, 0, 0)
@@ -846,24 +991,56 @@ class SaberController:
         self.event_start_time = 0
         self.last_gc_time = time.monotonic()
         self.last_battery_check = 0
+        self.last_battery_warning = 0
+        self.last_accel_recovery_attempt = 0
 
-        # Touch debouncing with long press detection
-        self.last_touch_time = 0
-        self.touch_press_start = 0
-        self.touch_is_long_press = False
+        # Per-input touch state for proper debouncing
+        self.touch_state = {
+            'left': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
+            'right': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
+            'a3': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
+            'a4': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
+        }
 
         # Error tracking
         self.accel_error_count = 0
         self.accel_enabled = True
+        self.accel_disabled_time = 0
 
         # Diagnostics
         self.loop_count = 0
         self.state_changes = 0
 
+        # Watchdog setup
+        self.watchdog = None
+        self._init_watchdog()
+
         self._update_theme_colors()
         self._apply_power_mode()
         self.display.turn_off_screen()
         print("SaberController init complete.\n")
+
+    def _init_watchdog(self):
+        """Initialize watchdog timer for crash recovery."""
+        if not UserConfig.ENABLE_WATCHDOG or not WATCHDOG_AVAILABLE:
+            return
+
+        try:
+            self.watchdog = microcontroller.watchdog
+            self.watchdog.timeout = UserConfig.WATCHDOG_TIMEOUT
+            self.watchdog.mode = WatchDogMode.RESET
+            print("  Watchdog enabled ({}s timeout)".format(UserConfig.WATCHDOG_TIMEOUT))
+        except Exception as e:
+            print("  Watchdog init failed:", e)
+            self.watchdog = None
+
+    def _feed_watchdog(self):
+        """Feed the watchdog to prevent reset."""
+        if self.watchdog is not None:
+            try:
+                self.watchdog.feed()
+            except Exception:
+                pass
 
     def _apply_power_mode(self):
         """Apply power mode settings."""
@@ -947,6 +1124,7 @@ class SaberController:
         start_time = time.monotonic()
 
         while True:
+            self._feed_watchdog()  # Keep watchdog happy during animation
             elapsed = time.monotonic() - start_time
             if elapsed > duration:
                 break
@@ -978,108 +1156,143 @@ class SaberController:
             pass
 
         while self.audio.audio and self.audio.audio.playing:
+            self._feed_watchdog()  # Keep watchdog happy during audio wait
             time.sleep(SaberConfig.AUDIO_STOP_CHECK_INTERVAL)
 
-    def _check_touch_debounced(self, touch_input):
-        """Check touch input with debouncing and long-press detection."""
+    def _get_touch_key(self, touch_input):
+        """Get the key for a touch input's state."""
+        if touch_input == self.hw.touch_left:
+            return 'left'
+        elif touch_input == self.hw.touch_right:
+            return 'right'
+        elif touch_input == self.hw.touch_batt_a3:
+            return 'a3'
+        elif touch_input == self.hw.touch_batt_a4:
+            return 'a4'
+        return None
+
+    def _check_touch_debounced(self, touch_input, touch_key=None):
+        """Check touch input with debouncing and long-press detection (per-input state)."""
         if not touch_input:
             return False
+
+        # Get the key for this input's state
+        if touch_key is None:
+            touch_key = self._get_touch_key(touch_input)
+        if touch_key is None or touch_key not in self.touch_state:
+            return False
+
+        state = self.touch_state[touch_key]
 
         try:
             if touch_input.value:
                 now = time.monotonic()
 
                 # Start of press
-                if self.touch_press_start == 0:
-                    self.touch_press_start = now
+                if state['press_start'] == 0:
+                    state['press_start'] = now
 
                 # Check for long press
-                press_duration = now - self.touch_press_start
-                if press_duration >= UserConfig.LONG_PRESS_TIME and not self.touch_is_long_press:
-                    self.touch_is_long_press = True
+                press_duration = now - state['press_start']
+                if press_duration >= UserConfig.LONG_PRESS_TIME and not state['is_long_press']:
+                    state['is_long_press'] = True
                     return False  # Don't trigger normal press during long press
 
                 # Normal debounced press
-                if now - self.last_touch_time >= UserConfig.TOUCH_DEBOUNCE_TIME:
-                    self.last_touch_time = now
+                if now - state['last_time'] >= UserConfig.TOUCH_DEBOUNCE_TIME:
+                    state['last_time'] = now
                     return True
             else:
-                # Release - reset long press tracking
-                self.touch_press_start = 0
-                self.touch_is_long_press = False
+                # Release - reset long press tracking for this input
+                state['press_start'] = 0
+                state['is_long_press'] = False
 
         except Exception as e:
             print("Touch read error:", e)
 
         return False
 
-    def _check_long_press(self, touch_input):
-        """Check if touch is a long press."""
+    def _check_long_press(self, touch_input, touch_key=None):
+        """Check if touch is a long press (per-input state)."""
         if not touch_input:
             return False
 
+        if touch_key is None:
+            touch_key = self._get_touch_key(touch_input)
+        if touch_key is None or touch_key not in self.touch_state:
+            return False
+
         try:
-            if touch_input.value and self.touch_is_long_press:
+            if touch_input.value and self.touch_state[touch_key]['is_long_press']:
                 return True
         except Exception:
             pass
 
         return False
 
-    def _wait_for_touch_release(self, touch_input):
-        """Wait for touch input to be released."""
+    def _wait_for_touch_release(self, touch_input, touch_key=None):
+        """Wait for touch input to be released (per-input state)."""
         if not touch_input:
             return
 
+        if touch_key is None:
+            touch_key = self._get_touch_key(touch_input)
+
         try:
             while touch_input.value:
+                self._feed_watchdog()  # Keep watchdog happy during wait
                 time.sleep(UserConfig.TOUCH_DEBOUNCE_TIME)
         except Exception:
             pass
 
-        # Reset long press tracking on release
-        self.touch_press_start = 0
-        self.touch_is_long_press = False
+        # Reset long press tracking on release for this input
+        if touch_key and touch_key in self.touch_state:
+            self.touch_state[touch_key]['press_start'] = 0
+            self.touch_state[touch_key]['is_long_press'] = False
 
     def _handle_battery_touch(self):
         """Handle battery status display request."""
         # Check for long press on A3/A4 for volume control
-        if self._check_long_press(self.hw.touch_batt_a3):
-            self.audio.increase_volume()
+        if self._check_long_press(self.hw.touch_batt_a3, 'a3'):
+            new_vol = self.audio.increase_volume()
+            PersistentSettings.save_volume(new_vol)  # Persist volume change
             self.display.show_volume_status(self.audio.volume)
-            self._wait_for_touch_release(self.hw.touch_batt_a3)
+            self._wait_for_touch_release(self.hw.touch_batt_a3, 'a3')
             return True
 
-        if self._check_long_press(self.hw.touch_batt_a4):
-            self.audio.decrease_volume()
+        if self._check_long_press(self.hw.touch_batt_a4, 'a4'):
+            new_vol = self.audio.decrease_volume()
+            PersistentSettings.save_volume(new_vol)  # Persist volume change
             self.display.show_volume_status(self.audio.volume)
-            self._wait_for_touch_release(self.hw.touch_batt_a4)
+            self._wait_for_touch_release(self.hw.touch_batt_a4, 'a4')
             return True
 
         # Normal press shows battery
-        if self._check_touch_debounced(self.hw.touch_batt_a3) or \
-           self._check_touch_debounced(self.hw.touch_batt_a4):
+        if self._check_touch_debounced(self.hw.touch_batt_a3, 'a3') or \
+           self._check_touch_debounced(self.hw.touch_batt_a4, 'a4'):
             self.display.show_battery_status()
-            self._wait_for_touch_release(self.hw.touch_batt_a3)
-            self._wait_for_touch_release(self.hw.touch_batt_a4)
+            self._wait_for_touch_release(self.hw.touch_batt_a3, 'a3')
+            self._wait_for_touch_release(self.hw.touch_batt_a4, 'a4')
             return True
         return False
 
     def _handle_theme_switch(self):
         """Handle theme switch button."""
         # Long press on left button cycles volume presets
-        if self._check_long_press(self.hw.touch_left):
+        if self._check_long_press(self.hw.touch_left, 'left'):
             preset_vol = self.audio.cycle_volume_preset()
+            PersistentSettings.save_volume(preset_vol)  # Persist volume change
             self.display.show_volume_status(preset_vol)
-            self._wait_for_touch_release(self.hw.touch_left)
+            self._wait_for_touch_release(self.hw.touch_left, 'left')
             return True
 
-        if not self._check_touch_debounced(self.hw.touch_left):
+        if not self._check_touch_debounced(self.hw.touch_left, 'left'):
             return False
 
         if self.mode == SaberConfig.STATE_OFF:
             old_theme = self.theme_index
             self.cycle_theme()
+            PersistentSettings.save_theme(self.theme_index)  # Persist theme change
             self.audio.play_audio_clip(self.theme_index, "switch")
             print("Theme: {} -> {}".format(old_theme, self.theme_index))
             self.display.show_image(self.theme_index, "logo")
@@ -1087,6 +1300,7 @@ class SaberController:
         else:
             self.audio.start_fade_out()
             while not self.audio.update_fade():
+                self._feed_watchdog()  # Keep watchdog happy during fade
                 time.sleep(0.01)
 
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
@@ -1094,17 +1308,18 @@ class SaberController:
             self._transition_to_state(SaberConfig.STATE_OFF)
 
             self.cycle_theme()
+            PersistentSettings.save_theme(self.theme_index)  # Persist theme change
             print("Theme (while on): {}".format(self.theme_index))
             self.audio.play_audio_clip(self.theme_index, "switch")
             self.display.show_image(self.theme_index, "logo")
             self.event_start_time = time.monotonic()
 
-        self._wait_for_touch_release(self.hw.touch_left)
+        self._wait_for_touch_release(self.hw.touch_left, 'left')
         return True
 
     def _handle_power_toggle(self):
         """Handle power on/off button."""
-        if not self._check_touch_debounced(self.hw.touch_right):
+        if not self._check_touch_debounced(self.hw.touch_right, 'right'):
             return False
 
         if self.mode == SaberConfig.STATE_OFF:
@@ -1120,13 +1335,14 @@ class SaberController:
 
             self.audio.start_fade_out()
             while not self.audio.update_fade():
+                self._feed_watchdog()  # Keep watchdog happy during fade
                 time.sleep(0.01)
 
             self._animate_power("off", duration=SaberConfig.POWER_OFF_DURATION, reverse=True)
             self._transition_to_state(SaberConfig.STATE_OFF)
             self.event_start_time = time.monotonic()
 
-        self._wait_for_touch_release(self.hw.touch_right)
+        self._wait_for_touch_release(self.hw.touch_right, 'right')
         return True
 
     def _read_acceleration_magnitude(self):
@@ -1146,6 +1362,7 @@ class SaberController:
             if self.accel_error_count >= UserConfig.MAX_ACCEL_ERRORS:
                 print("Accelerometer disabled after {} errors".format(self.accel_error_count))
                 self.accel_enabled = False
+                self.accel_disabled_time = time.monotonic()  # Track when disabled for recovery
             else:
                 if self.accel_error_count % 5 == 0:
                     print("Accel read error {} of {}: {}".format(
@@ -1153,6 +1370,26 @@ class SaberController:
 
             time.sleep(UserConfig.ERROR_RECOVERY_DELAY)
             return None
+
+    def _try_recover_accelerometer(self):
+        """Attempt to recover a disabled accelerometer."""
+        if self.accel_enabled:
+            return True  # Already working
+
+        now = time.monotonic()
+        if now - self.last_accel_recovery_attempt < UserConfig.ACCEL_RECOVERY_INTERVAL:
+            return False  # Too soon to retry
+
+        self.last_accel_recovery_attempt = now
+        print("Attempting accelerometer recovery...")
+
+        if self.hw.try_reinit_accel():
+            self.accel_enabled = True
+            self.accel_error_count = 0
+            print("Accelerometer recovered!")
+            return True
+
+        return False
 
     def _handle_motion_detection(self):
         """Handle motion detection for swing and hit."""
@@ -1175,6 +1412,7 @@ class SaberController:
 
             self.audio.start_fade_out()
             while not self.audio.update_fade():
+                self._feed_watchdog()  # Keep watchdog happy during fade
                 time.sleep(0.01)
 
             self.audio.play_audio_clip(self.theme_index, "hit")
@@ -1191,6 +1429,7 @@ class SaberController:
 
             self.audio.start_fade_out()
             while not self.audio.update_fade():
+                self._feed_watchdog()  # Keep watchdog happy during fade
                 time.sleep(0.01)
 
             self.audio.play_audio_clip(self.theme_index, "swing")
@@ -1248,12 +1487,12 @@ class SaberController:
 
     def _mix_colors(self, color1, color2, w2):
         """Mix two colors with weight w2 for color2."""
-        w2 = max(0, min(w2, 1.0))
+        w2 = max(0.0, min(w2, 1.0))
         w1 = 1.0 - w2
         return (
             int(color1[0] * w1 + color2[0] * w2),
             int(color1[1] * w1 + color2[1] * w2),
-            int(color1[2] * w1 + color2[1] * w2),
+            int(color1[2] * w1 + color2[2] * w2),  # BUG FIX: was color2[1]
         )
 
     def _update_strip_brightness(self):
@@ -1275,6 +1514,17 @@ class SaberController:
         """Run periodic maintenance tasks."""
         now = time.monotonic()
 
+        # Critical memory check - force GC if memory is low
+        try:
+            mem_free = gc.mem_free()
+            if mem_free < UserConfig.CRITICAL_MEMORY_THRESHOLD:
+                gc.collect()
+                if UserConfig.ENABLE_DIAGNOSTICS:
+                    print("CRITICAL GC: {} -> {} bytes free".format(mem_free, gc.mem_free()))
+        except Exception:
+            pass
+
+        # Regular garbage collection in idle states
         if self.mode in (SaberConfig.STATE_OFF, SaberConfig.STATE_IDLE):
             if now - self.last_gc_time > UserConfig.GC_INTERVAL:
                 gc.collect()
@@ -1284,11 +1534,60 @@ class SaberController:
                     mem_free = gc.mem_free()
                     print("GC: {} bytes free".format(mem_free))
 
-        if UserConfig.ENABLE_DIAGNOSTICS:
-            if now - self.last_battery_check > UserConfig.BATTERY_CHECK_INTERVAL:
-                battery = self._get_battery_percentage()
+        # Battery monitoring and warnings
+        if now - self.last_battery_check > UserConfig.BATTERY_CHECK_INTERVAL:
+            battery = self._get_battery_percentage()
+            self.last_battery_check = now
+
+            if UserConfig.ENABLE_DIAGNOSTICS:
                 print("Battery: {}".format(battery))
-                self.last_battery_check = now
+
+            # Battery warnings (only if not on USB and enough time has passed)
+            if battery != "USB" and isinstance(battery, int):
+                if battery <= UserConfig.BATTERY_CRITICAL_THRESHOLD:
+                    if now - self.last_battery_warning > UserConfig.BATTERY_WARNING_INTERVAL:
+                        self._battery_critical_warning()
+                        self.last_battery_warning = now
+                elif battery <= UserConfig.BATTERY_WARNING_THRESHOLD:
+                    if now - self.last_battery_warning > UserConfig.BATTERY_WARNING_INTERVAL:
+                        self._battery_low_warning()
+                        self.last_battery_warning = now
+
+        # Try to recover disabled accelerometer
+        if not self.accel_enabled:
+            self._try_recover_accelerometer()
+
+    def _battery_low_warning(self):
+        """Warn user about low battery with LED flash."""
+        print("WARNING: Low battery!")
+        if self.hw.strip and self.mode == SaberConfig.STATE_OFF:
+            try:
+                # Flash yellow twice
+                for _ in range(2):
+                    self.hw.strip.fill((255, 255, 0))
+                    self.hw.strip.show()
+                    time.sleep(0.15)
+                    self.hw.strip.fill(0)
+                    self.hw.strip.show()
+                    time.sleep(0.15)
+            except Exception:
+                pass
+
+    def _battery_critical_warning(self):
+        """Warn user about critical battery with LED flash."""
+        print("CRITICAL: Battery very low!")
+        if self.hw.strip and self.mode == SaberConfig.STATE_OFF:
+            try:
+                # Flash red three times
+                for _ in range(3):
+                    self.hw.strip.fill((255, 0, 0))
+                    self.hw.strip.show()
+                    time.sleep(0.1)
+                    self.hw.strip.fill(0)
+                    self.hw.strip.show()
+                    time.sleep(0.1)
+            except Exception:
+                pass
 
     def run(self):
         """Main run loop with bulletproof error handling."""
@@ -1297,11 +1596,18 @@ class SaberController:
         print("  - Long press A3: Increase volume")
         print("  - Long press A4: Decrease volume")
         print("  - Long press LEFT: Cycle volume presets")
+        if UserConfig.ENABLE_PERSISTENT_SETTINGS:
+            print("Settings: Persistent (saved across reboots)")
+        if self.watchdog is not None:
+            print("Watchdog: Enabled ({}s timeout)".format(UserConfig.WATCHDOG_TIMEOUT))
         print()
 
         try:
             while True:
                 self.loop_count += 1
+
+                # Feed watchdog at start of each loop iteration
+                self._feed_watchdog()
 
                 self.audio.update_fade()
                 self.audio.update_crossfade()
@@ -1330,6 +1636,12 @@ class SaberController:
         except KeyboardInterrupt:
             print("\nShutdown requested...")
             self.cleanup()
+        except MemoryError as e:
+            # Try to recover from memory errors
+            print("\nMEMORY ERROR:", e)
+            gc.collect()
+            print("Attempting recovery... {} bytes free".format(gc.mem_free()))
+            # Don't re-raise - try to continue
         except Exception as e:
             print("\nFATAL ERROR:", e)
             self.cleanup()
@@ -1338,6 +1650,15 @@ class SaberController:
     def cleanup(self):
         """Clean up all resources."""
         print("Cleaning up...")
+
+        # Disable watchdog during cleanup
+        if self.watchdog is not None:
+            try:
+                self.watchdog.mode = None
+                print("  Watchdog disabled")
+            except Exception:
+                pass
+
         try:
             self.audio.cleanup()
             self.display.cleanup()
