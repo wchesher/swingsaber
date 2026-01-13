@@ -87,8 +87,8 @@ class UserConfig:
     # Audio fade duration for smooth transitions
     FADE_TRANSITION_DURATION = 0.1  # 100ms fade for smoother transitions
     VOLUME_PRESETS = [30, 50, 70, 100]
-    AUDIO_SAMPLE_RATE = 22050
-    AUDIO_BITS_PER_SAMPLE = 16
+    AUDIO_SAMPLE_RATE = 16000
+    AUDIO_BITS_PER_SAMPLE = 8  # 8-bit unsigned for less CPU load
 
     # Motion detection
     NEAR_SWING_RATIO = 0.8  # 80% threshold for "almost" detection
@@ -144,8 +144,9 @@ class SaberConfig:
     NUM_PIXELS = 60
 
     # Motion thresholds (magnitude squared to avoid slow sqrt)
-    SWING_THRESHOLD = 140
-    HIT_THRESHOLD = 220
+    # At rest with gravity: ~96 (9.8²). Lower = more sensitive.
+    SWING_THRESHOLD = 115   # ~10.7 m/s² (~1.1g)
+    HIT_THRESHOLD = 160     # ~12.6 m/s² (~1.3g)
 
     # State machine states
     STATE_OFF = 0
@@ -557,12 +558,14 @@ class AudioManager:
             print("No audio available!")
             return False
 
-        gc.collect()
-
-        # Stop current playback
+        # Stop current playback and let DMA settle
         if self.audio.playing:
             self.audio.stop()
+            time.sleep(0.01)  # Let audio DMA fully stop
         self._close_current_file()
+
+        # Force GC before allocating new audio buffer
+        gc.collect()
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
         print("Playing:", filename)
