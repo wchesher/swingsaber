@@ -31,6 +31,7 @@ import busio     # I2C/SPI communication buses
 import neopixel  # Addressable RGB LED control
 import audioio   # Audio output
 import audiocore # WAV file handling
+import audiomixer  # Audio mixing for volume control
 import adafruit_msa3xx  # Accelerometer driver
 import touchio   # Capacitive touch input
 import analogio  # Analog voltage reading
@@ -70,9 +71,10 @@ class UserConfig:
     NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25 # 25% default (middle preset)
     BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]  # 15%, 25%, 35%
 
-    # Main loop timing (faster = more responsive, more power)
+    # Main loop timing (balance responsiveness vs audio quality)
+    # Faster loops can interfere with audio DMA on SAMD51
     IDLE_LOOP_DELAY = 0.05    # 50ms idle (20 Hz)
-    ACTIVE_LOOP_DELAY = 0.01  # 10ms active (100 Hz)
+    ACTIVE_LOOP_DELAY = 0.02  # 20ms active (50 Hz) - slower for cleaner audio
 
     # Audio
     STOP_AUDIO_WHEN_IDLE = True
@@ -80,8 +82,8 @@ class UserConfig:
     VOLUME_STEP = 10
     MIN_VOLUME = 10
     MAX_VOLUME = 100
-    CROSSFADE_DURATION = 0.05  # 50ms fade prevents audio pops
-    ENABLE_CROSSFADE = True
+    # Audio fade duration for smooth transitions
+    FADE_TRANSITION_DURATION = 0.1  # 100ms fade for smoother transitions
     VOLUME_PRESETS = [30, 50, 70, 100]
     AUDIO_SAMPLE_RATE = 22050
     AUDIO_BITS_PER_SAMPLE = 16
@@ -181,10 +183,10 @@ class SaberConfig:
     BATTERY_ADC_MAX = 65535
     BATTERY_VOLTAGE_DIVIDER = 2
 
-    # Audio
+    # Audio buffer settings (larger buffer = smoother audio, more latency)
     SILENCE_SAMPLE_SIZE = 1024
     AUDIO_STOP_CHECK_INTERVAL = 0.03
-    AUDIO_BUFFER_SIZE = 4096
+    AUDIO_BUFFER_SIZE = 8192  # Increased for cleaner audio on SAMD51
     FADE_IN_SAMPLES = 100
     FADE_OUT_SAMPLES = 100
 
@@ -477,38 +479,53 @@ class SaberHardware:
 # =============================================================================
 
 class AudioManager:
-    """Handle audio playback, volume, and fading."""
+    """Handle audio playback with mixer for volume control and smooth fading."""
 
-    def __init__(self):
+    def __init__(self, speaker_enable=None):
+        self.speaker_enable = speaker_enable
+        self.audio = None
+        self.mixer = None
+        self.voice = None
+
         try:
-            self.audio = audioio.AudioOut(board.SPEAKER)
-            print("Audio system OK.")
+            # quiescent_value=32768 reduces pops (midpoint for signed 16-bit)
+            self.audio = audioio.AudioOut(board.SPEAKER, quiescent_value=32768)
+
+            # Mixer provides real-time volume control via voice.level
+            self.mixer = audiomixer.Mixer(
+                voice_count=1,
+                sample_rate=UserConfig.AUDIO_SAMPLE_RATE,
+                channel_count=1,
+                bits_per_sample=UserConfig.AUDIO_BITS_PER_SAMPLE,
+                samples_signed=True,
+                buffer_size=SaberConfig.AUDIO_BUFFER_SIZE
+            )
+            self.voice = self.mixer.voice[0]
+            self.audio.play(self.mixer)
+            print("Audio system OK (mixer mode).")
         except Exception as e:
             print("Audio error:", e)
             self.audio = None
+            self.mixer = None
 
         self.current_wave_file = None
         self.current_wav = None
-        self.silence_sample = self._create_silence_sample()
         self.volume = UserConfig.DEFAULT_VOLUME
         self.volume_preset_index = 1
+        self._apply_volume()
 
         # Fade state
         self.fade_start_time = None
         self.fade_duration = 0
+        self.fade_start_level = 0
         self.is_fading = False
-        self.is_crossfading = False
-        self.crossfade_start_time = None
 
         print("  Audio volume: {}%".format(self.volume))
 
-    def _create_silence_sample(self):
-        try:
-            silent_samples = array.array("h", [0] * SaberConfig.SILENCE_SAMPLE_SIZE)
-            return audiocore.RawSample(silent_samples)
-        except Exception as e:
-            print("Error creating silence sample:", e)
-            return None
+    def _apply_volume(self):
+        """Apply current volume to mixer voice."""
+        if self.voice:
+            self.voice.level = self.volume / 100.0
 
     def _close_current_file(self):
         """Close current audio file (important for resource management)."""
@@ -523,6 +540,7 @@ class AudioManager:
 
     def set_volume(self, volume_percent):
         self.volume = max(UserConfig.MIN_VOLUME, min(volume_percent, UserConfig.MAX_VOLUME))
+        self._apply_volume()
         print("Volume: {}%".format(self.volume))
         return self.volume
 
@@ -536,7 +554,7 @@ class AudioManager:
         self.volume_preset_index = (self.volume_preset_index + 1) % len(UserConfig.VOLUME_PRESETS)
         return self.set_volume(UserConfig.VOLUME_PRESETS[self.volume_preset_index])
 
-    def _load_and_process_wav(self, filename, apply_volume=True):
+    def _load_and_process_wav(self, filename):
         try:
             wave_file = open(filename, "rb")
             wav = audiocore.WaveFile(wave_file)
@@ -550,55 +568,37 @@ class AudioManager:
 
     def play_audio_clip(self, theme_index, name, loop=False):
         """Play audio clip. File naming: sounds/[theme][name].wav"""
-        if not self.audio:
+        if not self.mixer or not self.voice:
             return False
 
         gc.collect()
 
-        if UserConfig.ENABLE_CROSSFADE and self.audio.playing:
-            self.start_crossfade()
-            time.sleep(0.01)
-        else:
-            if self.audio.playing:
-                self.audio.stop()
-
+        # Stop any current playback on this voice
+        self.voice.stop()
         self._close_current_file()
+
         filename = "sounds/{}{}.wav".format(theme_index, name)
-        self.current_wave_file, self.current_wav = self._load_and_process_wav(
-            filename, apply_volume=(self.volume < 100))
+        self.current_wave_file, self.current_wav = self._load_and_process_wav(filename)
 
         if self.current_wav is None:
             return False
 
         try:
-            self.audio.play(self.current_wav, loop=loop)
+            # Restore volume level before playing
+            self._apply_volume()
+            self.voice.play(self.current_wav, loop=loop)
             return True
         except Exception as e:
             print("Error playing audio:", e)
             self._close_current_file()
             return False
 
-    def start_crossfade(self):
-        if UserConfig.ENABLE_CROSSFADE:
-            self.is_crossfading = True
-            self.crossfade_start_time = time.monotonic()
-
-    def update_crossfade(self):
-        if not self.is_crossfading:
-            return False
-        if time.monotonic() - self.crossfade_start_time >= UserConfig.CROSSFADE_DURATION:
-            self.audio.stop()
-            self.is_crossfading = False
-            return True
-        return False
-
     def stop_audio(self):
-        if self.audio and self.audio.playing:
-            time.sleep(0.001)
-            self.audio.stop()
+        if self.voice:
+            self.voice.stop()
 
     def check_audio_done(self):
-        if self.audio and not self.audio.playing and self.current_wave_file is not None:
+        if self.voice and not self.voice.playing and self.current_wave_file is not None:
             self._close_current_file()
 
     def start_fade_out(self, duration=None):
@@ -606,26 +606,43 @@ class AudioManager:
             duration = SaberConfig.FADE_OUT_DURATION
         self.fade_start_time = time.monotonic()
         self.fade_duration = duration
+        self.fade_start_level = self.voice.level if self.voice else 0
         self.is_fading = True
 
     def update_fade(self):
-        if not self.is_fading:
+        """Update fade - actually reduces volume over time."""
+        if not self.is_fading or not self.voice:
             return False
-        if time.monotonic() - self.fade_start_time >= self.fade_duration:
-            self.stop_audio()
+
+        elapsed = time.monotonic() - self.fade_start_time
+        if elapsed >= self.fade_duration:
+            self.voice.level = 0
+            self.voice.stop()
             self._close_current_file()
             self.is_fading = False
-            if (not UserConfig.STOP_AUDIO_WHEN_IDLE) and self.silence_sample and self.audio:
-                try:
-                    self.audio.play(self.silence_sample, loop=True)
-                except Exception as e:
-                    print("Error playing silence:", e)
+            self._apply_volume()  # Restore volume for next clip
             return True
+
+        # Linear fade from start_level to 0
+        progress = elapsed / self.fade_duration
+        self.voice.level = self.fade_start_level * (1.0 - progress)
         return False
+
+    def mute(self):
+        """Temporarily mute audio (for display operations)."""
+        if self.speaker_enable:
+            self.speaker_enable.value = False
+
+    def unmute(self):
+        """Restore audio after mute."""
+        if self.speaker_enable:
+            self.speaker_enable.value = True
 
     def cleanup(self):
         self.stop_audio()
         self._close_current_file()
+        if self.audio:
+            self.audio.stop()
 
 
 # =============================================================================
@@ -635,8 +652,9 @@ class AudioManager:
 class SaberDisplay:
     """Manage TFT display with LRU image caching."""
 
-    def __init__(self, battery_voltage_ref):
+    def __init__(self, battery_voltage_ref, audio_manager=None):
         self.main_group = displayio.Group()
+        self.audio_manager = audio_manager  # For muting during display ops
 
         try:
             board.DISPLAY.auto_refresh = True
@@ -829,10 +847,14 @@ class SaberDisplay:
             return None
 
     def show_image(self, theme_index, image_type="logo", duration=None):
-        """Display theme image."""
+        """Display theme image (mutes audio to reduce display whine)."""
         if duration is None:
             duration = self.image_display_duration
             print("\n" * 40)
+
+        # Mute speaker during display refresh to reduce electrical noise
+        if self.audio_manager:
+            self.audio_manager.mute()
 
         try:
             while len(self.main_group):
@@ -854,6 +876,9 @@ class SaberDisplay:
             self.display_active = True
         except Exception as e:
             print("Error showing image:", e)
+        finally:
+            if self.audio_manager:
+                self.audio_manager.unmute()
 
     def update_display(self):
         """Handle display timeout."""
@@ -886,8 +911,8 @@ class SaberController:
         print("Booting SaberController...")
 
         self.hw = SaberHardware()
-        self.display = SaberDisplay(self._get_battery_percentage)
-        self.audio = AudioManager()
+        self.audio = AudioManager(speaker_enable=self.hw.speaker_enable)
+        self.display = SaberDisplay(self._get_battery_percentage, audio_manager=self.audio)
 
         self.power_saver_mode = False
         self.cpu_loop_delay = UserConfig.ACTIVE_LOOP_DELAY
@@ -1488,7 +1513,6 @@ class SaberController:
                 self._feed_watchdog()
 
                 self.audio.update_fade()
-                self.audio.update_crossfade()
 
                 if self._handle_battery_touch():
                     continue
