@@ -487,6 +487,10 @@ class AudioManager:
         self.mixer = None
         self.voice = None
 
+        # Enable speaker output (required for HalloWing M4)
+        if self.speaker_enable:
+            self.speaker_enable.value = True
+
         try:
             # quiescent_value=32768 reduces pops (midpoint for signed 16-bit)
             self.audio = audioio.AudioOut(board.SPEAKER, quiescent_value=32768)
