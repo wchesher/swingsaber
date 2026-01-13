@@ -73,7 +73,7 @@ class UserConfig:
     # Main loop timing (balance responsiveness vs audio quality)
     # Faster loops can interfere with audio DMA on SAMD51
     IDLE_LOOP_DELAY = 0.05    # 50ms idle (20 Hz)
-    ACTIVE_LOOP_DELAY = 0.02  # 20ms active (50 Hz) - slower for cleaner audio
+    ACTIVE_LOOP_DELAY = 0.025 # 25ms active (40 Hz) - gives audio DMA more time
 
     # Audio
     STOP_AUDIO_WHEN_IDLE = True
@@ -84,7 +84,7 @@ class UserConfig:
     # Audio fade duration for smooth transitions
     FADE_TRANSITION_DURATION = 0.1  # 100ms fade for smoother transitions
     VOLUME_PRESETS = [30, 50, 70, 100]
-    AUDIO_SAMPLE_RATE = 44100
+    AUDIO_SAMPLE_RATE = 22050
     AUDIO_BITS_PER_SAMPLE = 16
 
     # Motion detection
