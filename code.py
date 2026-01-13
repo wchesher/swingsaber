@@ -479,7 +479,7 @@ class SaberHardware:
 # =============================================================================
 
 class AudioManager:
-    """Handle audio playback with mixer for volume control and smooth fading."""
+    """Handle audio playback with mixer for real-time volume control."""
 
     def __init__(self, speaker_enable=None):
         self.speaker_enable = speaker_enable
@@ -490,40 +490,48 @@ class AudioManager:
         # Enable speaker output (required for HalloWing M4)
         if self.speaker_enable:
             self.speaker_enable.value = True
+            print("  Speaker enabled.")
 
         try:
-            # quiescent_value=32768 reduces pops (midpoint for signed 16-bit)
-            self.audio = audioio.AudioOut(board.SPEAKER, quiescent_value=32768)
+            # Initialize audio output (DAC on HalloWing M4)
+            self.audio = audioio.AudioOut(board.SPEAKER)
+            print("  AudioOut OK.")
 
-            # Mixer provides real-time volume control via voice.level
+            # Create mixer - sample_rate MUST match your WAV files!
+            # Common rates: 8000, 11025, 16000, 22050, 44100
             self.mixer = audiomixer.Mixer(
                 voice_count=1,
                 sample_rate=UserConfig.AUDIO_SAMPLE_RATE,
                 channel_count=1,
-                bits_per_sample=UserConfig.AUDIO_BITS_PER_SAMPLE,
-                samples_signed=True,
-                buffer_size=SaberConfig.AUDIO_BUFFER_SIZE
+                bits_per_sample=16,
+                samples_signed=True
             )
-            self.voice = self.mixer.voice[0]
+            print("  Mixer OK ({}Hz, mono, 16-bit signed)".format(UserConfig.AUDIO_SAMPLE_RATE))
+
+            # Start playing the mixer (it outputs silence until voice plays)
             self.audio.play(self.mixer)
+            self.voice = self.mixer.voice[0]
             print("Audio system OK (mixer mode).")
+
         except Exception as e:
-            print("Audio error:", e)
+            print("Audio init error:", e)
             self.audio = None
             self.mixer = None
+            self.voice = None
 
         self.current_wave_file = None
         self.current_wav = None
         self.volume = UserConfig.DEFAULT_VOLUME
         self.volume_preset_index = 1
-        self._apply_volume()
 
         # Fade state
         self.fade_start_time = None
         self.fade_duration = 0
-        self.fade_start_level = 0
+        self.fade_start_level = 1.0
         self.is_fading = False
 
+        # Apply initial volume
+        self._apply_volume()
         print("  Audio volume: {}%".format(self.volume))
 
     def _apply_volume(self):
@@ -562,6 +570,9 @@ class AudioManager:
         try:
             wave_file = open(filename, "rb")
             wav = audiocore.WaveFile(wave_file)
+            # Debug: print WAV info
+            print("  WAV: {}Hz, {}ch, {}bit".format(
+                wav.sample_rate, wav.channel_count, wav.bits_per_sample))
             return (wave_file, wav)
         except OSError:
             print("Audio file not found:", filename)
@@ -571,26 +582,30 @@ class AudioManager:
             return (None, None)
 
     def play_audio_clip(self, theme_index, name, loop=False):
-        """Play audio clip. File naming: sounds/[theme][name].wav"""
-        if not self.mixer or not self.voice:
+        """Play audio clip via mixer voice. File naming: sounds/[theme][name].wav"""
+        if not self.voice:
+            print("No voice available!")
             return False
 
         gc.collect()
 
-        # Stop any current playback on this voice
-        self.voice.stop()
+        # Stop current playback
+        if self.voice.playing:
+            self.voice.stop()
         self._close_current_file()
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
+        print("Playing:", filename)
         self.current_wave_file, self.current_wav = self._load_and_process_wav(filename)
 
         if self.current_wav is None:
             return False
 
         try:
-            # Restore volume level before playing
+            # Restore volume and play
             self._apply_volume()
             self.voice.play(self.current_wav, loop=loop)
+            print("  Playing! loop={}".format(loop))
             return True
         except Exception as e:
             print("Error playing audio:", e)
@@ -598,7 +613,7 @@ class AudioManager:
             return False
 
     def stop_audio(self):
-        if self.voice:
+        if self.voice and self.voice.playing:
             self.voice.stop()
 
     def check_audio_done(self):
@@ -610,11 +625,11 @@ class AudioManager:
             duration = SaberConfig.FADE_OUT_DURATION
         self.fade_start_time = time.monotonic()
         self.fade_duration = duration
-        self.fade_start_level = self.voice.level if self.voice else 0
+        self.fade_start_level = self.voice.level if self.voice else 1.0
         self.is_fading = True
 
     def update_fade(self):
-        """Update fade - actually reduces volume over time."""
+        """Update fade - gradually reduces volume."""
         if not self.is_fading or not self.voice:
             return False
 
@@ -624,10 +639,10 @@ class AudioManager:
             self.voice.stop()
             self._close_current_file()
             self.is_fading = False
-            self._apply_volume()  # Restore volume for next clip
+            self._apply_volume()  # Restore for next clip
             return True
 
-        # Linear fade from start_level to 0
+        # Linear fade
         progress = elapsed / self.fade_duration
         self.voice.level = self.fade_start_level * (1.0 - progress)
         return False
