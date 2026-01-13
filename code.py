@@ -162,7 +162,7 @@ class SaberConfig:
         STATE_IDLE: [STATE_SWING, STATE_HIT, STATE_TRANSITION, STATE_ERROR],
         STATE_SWING: [STATE_IDLE, STATE_ERROR],
         STATE_HIT: [STATE_IDLE, STATE_ERROR],
-        STATE_TRANSITION: [STATE_OFF, STATE_IDLE, STATE_ERROR],
+        STATE_TRANSITION: [STATE_OFF, STATE_IDLE, STATE_SWING, STATE_HIT, STATE_ERROR],
         STATE_ERROR: [STATE_OFF],
     }
 
@@ -830,7 +830,7 @@ class SaberDisplay:
             return None
 
     def show_image(self, theme_index, image_type="logo", duration=None):
-        """Display theme image (mutes audio to reduce display whine)."""
+        """Display theme image (blocking, mutes audio to reduce display whine)."""
         if duration is None:
             duration = self.image_display_duration
             print("\n" * 40)
@@ -863,10 +863,41 @@ class SaberDisplay:
             if self.audio_manager:
                 self.audio_manager.unmute()
 
+    def show_image_async(self, theme_index, image_type="logo", duration=None):
+        """Display theme image non-blocking (for use with simultaneous audio)."""
+        if duration is None:
+            duration = self.image_display_duration
+            print("\n" * 40)
+
+        try:
+            while len(self.main_group):
+                self.main_group.pop()
+
+            image = self._load_image(theme_index, image_type)
+            if image:
+                self.main_group.append(image)
+                board.DISPLAY.root_group = self.main_group
+                board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
+                board.DISPLAY.refresh()
+
+            # Set timeout for auto-off (handled by update_display)
+            self.display_start_time = time.monotonic()
+            self.display_timeout = duration
+            self.display_active = True
+        except Exception as e:
+            print("Error showing image:", e)
+
     def update_display(self):
-        """Handle display timeout."""
+        """Handle display timeout (clears image group and turns off screen)."""
         if self.display_active:
             if time.monotonic() - self.display_start_time > self.display_timeout:
+                # Clear the display group before turning off
+                try:
+                    while len(self.main_group):
+                        self.main_group.pop()
+                    board.DISPLAY.root_group = self.main_group
+                except Exception:
+                    pass
                 self.turn_off_screen()
                 self.display_active = False
 
@@ -1209,10 +1240,9 @@ class SaberController:
             self.cycle_theme()
             PersistentSettings.save_theme(self.theme_index)
             print("Theme: {} -> {}".format(old_theme, self.theme_index))
-            # Show image first (mutes speaker), then play sound after
-            self.display.show_image(self.theme_index, "logo")
-            time.sleep(0.05)  # Let audio settle after display unmutes
+            # Play switch sound and show image simultaneously (non-blocking)
             self.audio.play_audio_clip(self.theme_index, "switch")
+            self.display.show_image_async(self.theme_index, "logo")
             self.event_start_time = time.monotonic()
         else:
             self.audio.start_fade_out()
@@ -1227,10 +1257,9 @@ class SaberController:
             self.cycle_theme()
             PersistentSettings.save_theme(self.theme_index)
             print("Theme (while on): {}".format(self.theme_index))
-            # Show image first (mutes speaker), then play sound after
-            self.display.show_image(self.theme_index, "logo")
-            time.sleep(0.05)  # Let audio settle after display unmutes
+            # Play switch sound and show image simultaneously (non-blocking)
             self.audio.play_audio_clip(self.theme_index, "switch")
+            self.display.show_image_async(self.theme_index, "logo")
             self.event_start_time = time.monotonic()
 
         self._wait_for_touch_release(self.hw.touch_left, 'left')
