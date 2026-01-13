@@ -65,8 +65,10 @@ class UserConfig:
     DISPLAY_TIMEOUT_SAVER = 1.0
 
     # NeoPixel brightness (lower = less power, longer battery)
+    # Max safe brightness ~40% with 1781 battery (1A limit)
     NEOPIXEL_IDLE_BRIGHTNESS = 0.05   # 5% when idle
-    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.3  # 30% during action
+    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25 # 25% default (middle preset)
+    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]  # 15%, 25%, 35%
 
     # Main loop timing (faster = more responsive, more power)
     IDLE_LOOP_DELAY = 0.05    # 50ms idle (20 Hz)
@@ -117,7 +119,8 @@ class UserConfig:
     ENABLE_PERSISTENT_SETTINGS = True
     NVM_THEME_OFFSET = 0
     NVM_VOLUME_OFFSET = 1
-    NVM_MAGIC_OFFSET = 2
+    NVM_BRIGHTNESS_OFFSET = 2
+    NVM_MAGIC_OFFSET = 3
     NVM_MAGIC_VALUE = 0xAB
 
 
@@ -305,6 +308,32 @@ class PersistentSettings:
             return True
         except Exception as e:
             print("Error saving volume:", e)
+            return False
+
+    @staticmethod
+    def load_brightness():
+        """Load brightness preset index from NVM (returns 1 if invalid)."""
+        if not PersistentSettings.is_valid():
+            return 1  # Default to middle preset (25%)
+        try:
+            index = microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET]
+            if index < len(UserConfig.BRIGHTNESS_PRESETS):
+                return index
+        except Exception:
+            pass
+        return 1
+
+    @staticmethod
+    def save_brightness(brightness_index):
+        """Save brightness preset index to NVM."""
+        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
+            return False
+        try:
+            microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET] = brightness_index
+            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
+            return True
+        except Exception as e:
+            print("Error saving brightness:", e)
             return False
 
 
@@ -727,6 +756,43 @@ class SaberDisplay:
         except Exception as e:
             print("Error showing volume status:", e)
 
+    def show_brightness_status(self, brightness_percent):
+        """Show brightness with progress bar."""
+        try:
+            while len(self.main_group):
+                self.main_group.pop()
+
+            brightness_label = label.Label(
+                terminalio.FONT, text="BRIGHT: {}%".format(brightness_percent),
+                scale=2, color=0xFFFF00, x=10, y=30)
+            self.main_group.append(brightness_label)
+
+            # Scale to 0-100 for bar width (presets are 15-35%, scale to fill bar)
+            bar_width = max(1, min(int(brightness_percent * 2.5), 100))
+            brightness_group = displayio.Group()
+
+            bg_palette = displayio.Palette(1)
+            bg_palette[0] = 0x444444
+            bright_bg_bitmap = displayio.Bitmap(100, 14, 1)
+            bright_bg_bitmap.fill(0)
+            bg_tile = displayio.TileGrid(bright_bg_bitmap, pixel_shader=bg_palette, x=14, y=46)
+            brightness_group.append(bg_tile)
+
+            bright_palette = displayio.Palette(1)
+            bright_palette[0] = 0xFFFF00
+            bright_bitmap = displayio.Bitmap(bar_width, 10, 1)
+            bright_bitmap.fill(0)
+            bright_tile = displayio.TileGrid(bright_bitmap, pixel_shader=bright_palette, x=16, y=48)
+            brightness_group.append(bright_tile)
+            self.main_group.append(brightness_group)
+
+            board.DISPLAY.root_group = self.main_group
+            board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
+            self.display_start_time = time.monotonic()
+            self.display_active = True
+        except Exception as e:
+            print("Error showing brightness status:", e)
+
     def _evict_oldest_image(self):
         """Remove oldest image from cache (LRU eviction)."""
         if not self.image_cache_order:
@@ -831,7 +897,10 @@ class SaberController:
         self.theme_index = PersistentSettings.load_theme()
         saved_volume = PersistentSettings.load_volume()
         self.audio.set_volume(saved_volume)
-        print("  Loaded: theme={}, volume={}%".format(self.theme_index, saved_volume))
+        self.brightness_preset_index = PersistentSettings.load_brightness()
+        self.current_brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_preset_index]
+        print("  Loaded: theme={}, volume={}%, brightness={}%".format(
+            self.theme_index, saved_volume, int(self.current_brightness * 100)))
 
         # Color state (RGBW format)
         self.color_idle = (0, 0, 0, 0)
@@ -943,6 +1012,16 @@ class SaberController:
     def cycle_theme(self):
         self.theme_index = (self.theme_index + 1) % len(SaberConfig.THEMES)
         self._update_theme_colors()
+
+    def cycle_brightness_preset(self):
+        """Cycle through brightness presets and apply."""
+        self.brightness_preset_index = (self.brightness_preset_index + 1) % len(UserConfig.BRIGHTNESS_PRESETS)
+        self.current_brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_preset_index]
+        if self.hw.strip:
+            self.hw.strip.brightness = self.current_brightness
+            self.hw.strip.show()
+        print("Brightness: {}%".format(int(self.current_brightness * 100)))
+        return int(self.current_brightness * 100)
 
     def _transition_to_state(self, new_state):
         """Validate and execute state transition."""
@@ -1143,7 +1222,15 @@ class SaberController:
         return True
 
     def _handle_power_toggle(self):
-        """RIGHT: Power on/off toggle."""
+        """RIGHT: Long press = brightness presets, tap = power on/off."""
+        # Long press cycles brightness presets
+        if self._check_long_press(self.hw.touch_right, 'right'):
+            brightness_pct = self.cycle_brightness_preset()
+            PersistentSettings.save_brightness(self.brightness_preset_index)
+            self.display.show_brightness_status(brightness_pct)
+            self._wait_for_touch_release(self.hw.touch_right, 'right')
+            return True
+
         if not self._check_touch_debounced(self.hw.touch_right, 'right'):
             return False
 
@@ -1299,13 +1386,13 @@ class SaberController:
         )
 
     def _update_strip_brightness(self):
-        """Adjust brightness based on state."""
+        """Adjust brightness based on state (uses current preset for active)."""
         if not self.hw.strip:
             return
         try:
             target = UserConfig.NEOPIXEL_IDLE_BRIGHTNESS if \
                 self.mode == SaberConfig.STATE_IDLE else \
-                UserConfig.NEOPIXEL_ACTIVE_BRIGHTNESS
+                self.current_brightness
             if self.hw.strip.brightness != target:
                 self.hw.strip.brightness = target
         except Exception as e:
@@ -1388,7 +1475,7 @@ class SaberController:
         """Main event loop."""
         print("=== SABER READY ===")
         print("Controls: RIGHT=power, LEFT=theme, A3/A4=battery")
-        print("Long press: A3=vol+, A4=vol-, LEFT=presets")
+        print("Long press: RIGHT=brightness, LEFT=vol presets, A3=vol+, A4=vol-")
         if UserConfig.ENABLE_PERSISTENT_SETTINGS:
             print("Settings persist across reboots")
         if self.watchdog:
