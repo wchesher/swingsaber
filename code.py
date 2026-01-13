@@ -69,6 +69,9 @@ class UserConfig:
     NEOPIXEL_IDLE_BRIGHTNESS = 0.05   # 5% when idle
     NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25 # 25% default (middle preset)
     BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]  # 15%, 25%, 35%
+    # LED update rate limiting (prevents audio lag from NeoPixel blocking)
+    # 60 RGBW LEDs @ 800kHz = ~2.4ms blocking per update
+    LED_UPDATE_INTERVAL = 0.05  # 50ms = 20 FPS max (gives audio DMA breathing room)
 
     # Main loop timing (balance responsiveness vs audio quality)
     # Faster loops can interfere with audio DMA on SAMD51
@@ -917,6 +920,7 @@ class SaberController:
         self.last_battery_check = 0
         self.last_battery_warning = 0
         self.last_accel_recovery_attempt = 0
+        self.last_led_update = 0  # LED frame rate limiter
 
         # Per-input touch state (independent debouncing for each button)
         self.touch_state = {
@@ -1069,6 +1073,8 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i < lit_end else 0
                 self.hw.strip.show()
+                # Brief pause after LED update to let audio DMA catch up
+                time.sleep(0.02)
             except Exception as e:
                 print("Strip animation error:", e)
                 break
@@ -1363,9 +1369,13 @@ class SaberController:
             self._transition_to_state(SaberConfig.STATE_IDLE)
 
     def _fill_blend(self, c1, c2, ratio):
-        """Fill strip with blended color (only updates if changed)."""
+        """Fill strip with blended color (rate-limited to prevent audio lag)."""
         if not self.hw.strip:
             return
+        # Rate limit LED updates to prevent blocking audio DMA
+        now = time.monotonic()
+        if now - self.last_led_update < UserConfig.LED_UPDATE_INTERVAL:
+            return  # Skip this update, too soon
         ratio = max(0, min(ratio, 1.0))
         color = self._mix_colors(c1, c2, ratio)
         if color != self.last_color:
@@ -1373,6 +1383,7 @@ class SaberController:
                 self.hw.strip.fill(color)
                 self.hw.strip.show()
                 self.last_color = color
+                self.last_led_update = now
             except Exception as e:
                 print("Strip blend error:", e)
 
