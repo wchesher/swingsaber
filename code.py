@@ -145,8 +145,8 @@ class SaberConfig:
 
     # Motion thresholds (magnitude squared to avoid slow sqrt)
     # At rest with gravity: ~96 (9.8²). Lower = more sensitive.
-    SWING_THRESHOLD = 115   # ~10.7 m/s² (~1.1g)
-    HIT_THRESHOLD = 160     # ~12.6 m/s² (~1.3g)
+    SWING_THRESHOLD = 105   # ~10.2 m/s² (~1.04g) - lowered for better detection
+    HIT_THRESHOLD = 135     # ~11.6 m/s² (~1.18g) - lowered for better detection
 
     # State machine states
     STATE_OFF = 0
@@ -1208,9 +1208,11 @@ class SaberController:
             old_theme = self.theme_index
             self.cycle_theme()
             PersistentSettings.save_theme(self.theme_index)
-            self.audio.play_audio_clip(self.theme_index, "switch")
             print("Theme: {} -> {}".format(old_theme, self.theme_index))
+            # Show image first (mutes speaker), then play sound after
             self.display.show_image(self.theme_index, "logo")
+            time.sleep(0.05)  # Let audio settle after display unmutes
+            self.audio.play_audio_clip(self.theme_index, "switch")
             self.event_start_time = time.monotonic()
         else:
             self.audio.start_fade_out()
@@ -1225,8 +1227,10 @@ class SaberController:
             self.cycle_theme()
             PersistentSettings.save_theme(self.theme_index)
             print("Theme (while on): {}".format(self.theme_index))
-            self.audio.play_audio_clip(self.theme_index, "switch")
+            # Show image first (mutes speaker), then play sound after
             self.display.show_image(self.theme_index, "logo")
+            time.sleep(0.05)  # Let audio settle after display unmutes
+            self.audio.play_audio_clip(self.theme_index, "switch")
             self.event_start_time = time.monotonic()
 
         self._wait_for_touch_release(self.hw.touch_left, 'left')
@@ -1318,7 +1322,6 @@ class SaberController:
 
         if accel_magnitude_sq > SaberConfig.HIT_THRESHOLD:
             print("HIT: Mag²={:.1f}".format(accel_magnitude_sq))
-            self.event_start_time = time.monotonic()
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
             while not self.audio.update_fade():
@@ -1326,12 +1329,14 @@ class SaberController:
                 time.sleep(0.01)
             self.audio.play_audio_clip(self.theme_index, "hit")
             self.color_active = self.color_hit
+            # Set event time AFTER fade completes so animation starts fresh
+            self.event_start_time = time.monotonic()
+            self.last_led_update = 0  # Force immediate LED update
             self._transition_to_state(SaberConfig.STATE_HIT)
             return True
 
         elif accel_magnitude_sq > SaberConfig.SWING_THRESHOLD:
             print("SWING: Mag²={:.1f}".format(accel_magnitude_sq))
-            self.event_start_time = time.monotonic()
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
             while not self.audio.update_fade():
@@ -1339,6 +1344,9 @@ class SaberController:
                 time.sleep(0.01)
             self.audio.play_audio_clip(self.theme_index, "swing")
             self.color_active = self.color_swing
+            # Set event time AFTER fade completes so animation starts fresh
+            self.event_start_time = time.monotonic()
+            self.last_led_update = 0  # Force immediate LED update
             self._transition_to_state(SaberConfig.STATE_SWING)
             return True
 
@@ -1355,10 +1363,14 @@ class SaberController:
 
         if self.audio.audio and self.audio.audio.playing:
             elapsed = time.monotonic() - self.event_start_time
+            # Blend: 0 = full active color (swing/hit), 1 = full idle color
+            # Start with active color, fade to idle over time
             if self.mode == SaberConfig.STATE_SWING:
-                blend = abs(SaberConfig.SWING_BLEND_MIDPOINT - elapsed) * SaberConfig.SWING_BLEND_SCALE
+                # Swing: fast fade from swing color to idle (0.5 seconds)
+                blend = min(elapsed * 2.0, 1.0)
             else:
-                blend = elapsed
+                # Hit: slower fade from hit color to idle (1 second)
+                blend = min(elapsed, 1.0)
             self._fill_blend(self.color_active, self.color_idle, blend)
         else:
             self.audio.play_audio_clip(self.theme_index, "idle", loop=True)
