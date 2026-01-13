@@ -85,7 +85,7 @@ class UserConfig:
     # Audio fade duration for smooth transitions
     FADE_TRANSITION_DURATION = 0.1  # 100ms fade for smoother transitions
     VOLUME_PRESETS = [30, 50, 70, 100]
-    AUDIO_SAMPLE_RATE = 22050
+    AUDIO_SAMPLE_RATE = 44100
     AUDIO_BITS_PER_SAMPLE = 16
 
     # Motion detection
