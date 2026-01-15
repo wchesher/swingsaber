@@ -188,6 +188,10 @@ class SaberConfig:
     NUM_PIXELS = 60
     IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25% of full brightness
 
+    # Onboard NeoPixels (HalloWing M4 has 4 RGB pixels around the eye)
+    ONBOARD_PIXELS = 4
+    ONBOARD_BRIGHTNESS = 0.3
+
     # ==========================================================================
     # STATE MACHINE - The saber is always in exactly ONE of these states
     # ==========================================================================
@@ -383,6 +387,7 @@ class SaberHardware:
             self.battery_voltage = None
 
         self.strip = self._init_strip()
+        self.onboard = self._init_onboard_pixels()
         self.touch_left = None
         self.touch_right = None
         self.touch_batt_a3 = None
@@ -412,6 +417,23 @@ class SaberHardware:
             return strip
         except Exception as e:
             print("  NeoPixel error:", e)
+            return None
+
+    def _init_onboard_pixels(self):
+        """Initialize onboard NeoPixels (around the eye on HalloWing M4)."""
+        try:
+            pixels = neopixel.NeoPixel(
+                board.NEOPIXEL,
+                SaberConfig.ONBOARD_PIXELS,
+                brightness=SaberConfig.ONBOARD_BRIGHTNESS,
+                auto_write=False
+            )
+            pixels.fill(0)
+            pixels.show()
+            print("  Onboard pixels OK.")
+            return pixels
+        except Exception as e:
+            print("  Onboard pixels error:", e)
             return None
 
     def _init_touch(self):
@@ -465,6 +487,12 @@ class SaberHardware:
             try:
                 self.strip.fill(0)
                 self.strip.show()
+            except Exception:
+                pass
+        if self.onboard:
+            try:
+                self.onboard.fill(0)
+                self.onboard.show()
             except Exception:
                 pass
         if self.speaker_enable:
@@ -1410,6 +1438,71 @@ class SaberController:
         except Exception as e:
             print("Brightness error:", e)
 
+    def _update_onboard_pixels(self):
+        """Update the 4 onboard NeoPixels with slick state-based effects."""
+        if not self.hw.onboard:
+            return
+
+        try:
+            now = time.monotonic()
+            n = SaberConfig.ONBOARD_PIXELS
+
+            if self.mode == SaberConfig.STATE_OFF:
+                # Dark when off
+                self.hw.onboard.fill(0)
+
+            elif self.mode == SaberConfig.STATE_IDLE:
+                # Gentle breathing pulse in theme color
+                # Sine wave pulse: 0.3 to 1.0 brightness over 2 seconds
+                pulse = 0.65 + 0.35 * math.sin(now * math.pi)  # 0.3 to 1.0
+                r = int(self.color_idle[0] * pulse)
+                g = int(self.color_idle[1] * pulse)
+                b = int(self.color_idle[2] * pulse)
+                self.hw.onboard.fill((r, g, b))
+
+            elif self.mode == SaberConfig.STATE_SWING:
+                # Spinning chase effect in swing color
+                elapsed = now - self.event_start_time
+                pos = int(elapsed * 12) % n  # Spin ~3 times per second
+                for i in range(n):
+                    if i == pos:
+                        self.hw.onboard[i] = self.color_swing[:3]  # RGB only
+                    else:
+                        # Dim trail
+                        dist = (pos - i) % n
+                        fade = max(0, 1.0 - dist * 0.4)
+                        r = int(self.color_swing[0] * fade * 0.3)
+                        g = int(self.color_swing[1] * fade * 0.3)
+                        b = int(self.color_swing[2] * fade * 0.3)
+                        self.hw.onboard[i] = (r, g, b)
+
+            elif self.mode == SaberConfig.STATE_HIT:
+                # Bright white flash that fades to hit color
+                elapsed = now - self.event_start_time
+                if elapsed < 0.1:
+                    # Initial white flash
+                    self.hw.onboard.fill((255, 255, 255))
+                else:
+                    # Fade from hit color to idle
+                    fade = min((elapsed - 0.1) * 2, 1.0)
+                    r = int(self.color_hit[0] * (1 - fade) + self.color_idle[0] * fade)
+                    g = int(self.color_hit[1] * (1 - fade) + self.color_idle[1] * fade)
+                    b = int(self.color_hit[2] * (1 - fade) + self.color_idle[2] * fade)
+                    self.hw.onboard.fill((r, g, b))
+
+            elif self.mode == SaberConfig.STATE_TRANSITION:
+                # Quick spinner during power on/off
+                pos = int(now * 8) % n
+                for i in range(n):
+                    if i == pos:
+                        self.hw.onboard[i] = self.color_swing[:3]
+                    else:
+                        self.hw.onboard[i] = (0, 0, 0)
+
+            self.hw.onboard.show()
+        except Exception as e:
+            print("Onboard pixel error:", e)
+
     def _periodic_maintenance(self):
         """Run maintenance: GC, battery check, accel recovery."""
         now = time.monotonic()
@@ -1508,6 +1601,7 @@ class SaberController:
 
                 self._handle_motion_detection()
                 self._update_swing_hit_animation()
+                self._update_onboard_pixels()
                 self.display.update_display()
                 self.audio.check_audio_done()
                 self._update_strip_brightness()
