@@ -144,10 +144,11 @@ class SaberConfig:
     # NeoPixel (Adafruit 4914: RGBW strip, 60 LEDs/m)
     NUM_PIXELS = 60
 
-    # Motion thresholds (magnitude squared to avoid slow sqrt)
-    # At rest with gravity: ~96 (9.8²). Lower = more sensitive.
-    SWING_THRESHOLD = 105   # ~10.2 m/s² (~1.04g) - lowered for better detection
-    HIT_THRESHOLD = 135     # ~11.6 m/s² (~1.18g) - lowered for better detection
+    # Motion thresholds (delta magnitude squared - change in acceleration)
+    # Delta-based: measures CHANGE in acceleration, so gravity is ignored.
+    # At rest: delta ~0. Lower = more sensitive.
+    SWING_THRESHOLD = 15    # Moderate change in acceleration
+    HIT_THRESHOLD = 40      # Sharp change in acceleration (impact)
 
     # State machine states
     STATE_OFF = 0
@@ -978,6 +979,9 @@ class SaberController:
         self.accel_enabled = True
         self.accel_disabled_time = 0
 
+        # Delta-based motion detection (previous acceleration for change detection)
+        self.prev_accel = (0.0, 0.0, 0.0)
+
         # Diagnostics
         self.loop_count = 0
         self.state_changes = 0
@@ -1314,16 +1318,29 @@ class SaberController:
         self._wait_for_touch_release(self.hw.touch_right, 'right')
         return True
 
-    def _read_acceleration_magnitude(self):
-        """Read accelerometer. Returns (mag², x, y, z) or None."""
+    def _read_acceleration_delta(self):
+        """Read accelerometer and calculate delta from previous reading.
+
+        Returns (delta_mag², delta_x, delta_y, delta_z, raw_x, raw_y, raw_z) or None.
+        Delta-based detection ignores gravity since it measures CHANGE in acceleration.
+        """
         if not self.accel_enabled or not self.hw.accel:
             return None
 
         try:
             accel_x, accel_y, accel_z = self.hw.accel.acceleration
-            accel_magnitude_sq = accel_x**2 + accel_y**2 + accel_z**2
+
+            # Calculate delta (change from previous reading)
+            delta_x = accel_x - self.prev_accel[0]
+            delta_y = accel_y - self.prev_accel[1]
+            delta_z = accel_z - self.prev_accel[2]
+            delta_mag_sq = delta_x**2 + delta_y**2 + delta_z**2
+
+            # Store current as previous for next iteration
+            self.prev_accel = (accel_x, accel_y, accel_z)
+
             self.accel_error_count = 0
-            return (accel_magnitude_sq, accel_x, accel_y, accel_z)
+            return (delta_mag_sq, delta_x, delta_y, delta_z, accel_x, accel_y, accel_z)
         except Exception as e:
             self.accel_error_count += 1
             if self.accel_error_count >= UserConfig.MAX_ACCEL_ERRORS:
@@ -1353,29 +1370,28 @@ class SaberController:
         return False
 
     def _handle_motion_detection(self):
-        """Detect swing/hit from accelerometer."""
+        """Detect swing/hit from accelerometer using delta (change in acceleration)."""
         if self.mode != SaberConfig.STATE_IDLE:
             return False
 
-        accel_data = self._read_acceleration_magnitude()
+        accel_data = self._read_acceleration_delta()
         if accel_data is None:
             return False
 
-        accel_magnitude_sq, accel_x, accel_y, accel_z = accel_data
+        delta_mag_sq, delta_x, delta_y, delta_z, raw_x, raw_y, raw_z = accel_data
         now = time.monotonic()
 
-        # Periodic accel output for threshold tuning
+        # Periodic output for threshold tuning (delta-based, rest ~0)
         if UserConfig.ENABLE_DIAGNOSTICS:
             if now - self.last_accel_output >= UserConfig.ACCEL_OUTPUT_INTERVAL:
                 self.last_accel_output = now
-                # Show mag² relative to thresholds: swing=105, hit=135, rest~96
-                print("accel: {:.0f} (swing>{} hit>{})".format(
-                    accel_magnitude_sq,
+                print("delta: {:.1f} (swing>{} hit>{})".format(
+                    delta_mag_sq,
                     SaberConfig.SWING_THRESHOLD,
                     SaberConfig.HIT_THRESHOLD))
 
-        if accel_magnitude_sq > SaberConfig.HIT_THRESHOLD:
-            print(">>> HIT: {:.0f}".format(accel_magnitude_sq))
+        if delta_mag_sq > SaberConfig.HIT_THRESHOLD:
+            print(">>> HIT: {:.1f}".format(delta_mag_sq))
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
             while not self.audio.update_fade():
@@ -1389,8 +1405,8 @@ class SaberController:
             self._transition_to_state(SaberConfig.STATE_HIT)
             return True
 
-        elif accel_magnitude_sq > SaberConfig.SWING_THRESHOLD:
-            print(">> SWING: {:.0f}".format(accel_magnitude_sq))
+        elif delta_mag_sq > SaberConfig.SWING_THRESHOLD:
+            print(">> SWING: {:.1f}".format(delta_mag_sq))
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
             while not self.audio.update_fade():
@@ -1552,7 +1568,7 @@ class SaberController:
     def run(self):
         """Main event loop."""
         print("=== SABER READY ===")
-        print("Thresholds: swing>{}, hit>{} (rest~96)".format(
+        print("Delta thresholds: swing>{}, hit>{} (rest~0)".format(
             SaberConfig.SWING_THRESHOLD, SaberConfig.HIT_THRESHOLD))
         print("Controls: RIGHT=power, LEFT=theme")
         print("Long: RIGHT=bright, LEFT=vol, A3=vol+, A4=vol-")
