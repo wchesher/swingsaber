@@ -40,7 +40,6 @@ import terminalio  # Built-in font
 import microcontroller  # Low-level MCU access (NVM storage)
 from digitalio import DigitalInOut
 from adafruit_display_text import label
-import array     # Efficient numeric arrays
 
 # Watchdog: Hardware timer that resets device if code hangs
 # Must be "fed" regularly to prove code is running
@@ -60,9 +59,7 @@ class UserConfig:
 
     # Display (0.0-1.0 brightness)
     DISPLAY_BRIGHTNESS = 0.3
-    DISPLAY_BRIGHTNESS_SAVER = 0.1
     DISPLAY_TIMEOUT_NORMAL = 2.0   # Seconds before auto-off
-    DISPLAY_TIMEOUT_SAVER = 1.0
 
     # NeoPixel brightness (lower = less power, longer battery)
     # Max safe brightness ~40% with 1781 battery (1A limit)
@@ -141,48 +138,56 @@ class SaberConfig:
     SPEAKER_ENABLE_PIN = board.SPEAKER_ENABLE
     VOLTAGE_MONITOR_PIN = board.VOLTAGE_MONITOR
 
-    # NeoPixel (Adafruit 4914: RGBW strip, 60 LEDs/m)
+    # NeoPixel LED strip (Adafruit 4914: RGBW strip, 60 LEDs per meter)
     NUM_PIXELS = 60
 
-    # Motion thresholds (delta magnitude squared - change in acceleration)
-    # Delta-based: measures CHANGE in acceleration, so gravity is ignored.
-    # At rest: delta ~0. Lower = more sensitive.
-    SWING_THRESHOLD = 15    # Moderate change in acceleration
-    HIT_THRESHOLD = 40      # Sharp change in acceleration (impact)
+    # ==========================================================================
+    # MOTION SENSITIVITY - Adjust these to tune swing/hit detection
+    # ==========================================================================
+    # These measure how much the acceleration CHANGED since last reading.
+    # At rest: ~0 (no change). Moving: higher values.
+    # Lower number = more sensitive (triggers more easily)
+    # Higher number = less sensitive (needs bigger movements)
+    #
+    # Watch the console output to see your values and tune accordingly:
+    #   "delta: 5.2 (swing>15 hit>40)" means current reading is 5.2
+    #
+    SWING_THRESHOLD = 15    # Gentle swing triggers at this level
+    HIT_THRESHOLD = 40      # Hard impact/clash triggers at this level
 
-    # State machine states
-    STATE_OFF = 0
-    STATE_IDLE = 1
-    STATE_SWING = 2
-    STATE_HIT = 3
-    STATE_TRANSITION = 4
-    STATE_ERROR = 5
+    # ==========================================================================
+    # STATE MACHINE - The saber is always in exactly ONE of these states
+    # ==========================================================================
+    # Think of states like modes: the saber behaves differently in each one.
+    # OFF -> user presses power -> IDLE (blade on, waiting for motion)
+    # IDLE -> user swings -> SWING (play swing sound/animation)
+    # IDLE -> user hits something -> HIT (play clash sound/animation)
+    # Any state -> user presses power -> OFF (blade retracts)
 
-    # State names for console output
-    STATE_NAMES = {
-        0: "OFF",
-        1: "IDLE",
-        2: "SWING",
-        3: "HIT",
-        4: "TRANS",
-        5: "ERROR",
-    }
+    STATE_OFF = 0         # Blade is dark, saber is "sleeping"
+    STATE_IDLE = 1        # Blade is lit, waiting for motion
+    STATE_SWING = 2       # Swing detected, playing swing effect
+    STATE_HIT = 3         # Impact detected, playing clash effect
+    STATE_TRANSITION = 4  # Animating between states (power on/off)
+    STATE_ERROR = 5       # Something went wrong
 
-    # Valid state transitions (prevents invalid states)
+    # Human-readable names for console output
+    STATE_NAMES = {0: "OFF", 1: "IDLE", 2: "SWING", 3: "HIT", 4: "TRANS", 5: "ERROR"}
+
+    # Which state transitions are allowed (prevents bugs from impossible states)
+    # Format: FROM_STATE: [list of allowed TO_STATES]
     VALID_TRANSITIONS = {
         STATE_OFF: [STATE_TRANSITION, STATE_ERROR],
         STATE_IDLE: [STATE_SWING, STATE_HIT, STATE_TRANSITION, STATE_ERROR],
-        STATE_SWING: [STATE_IDLE, STATE_TRANSITION, STATE_ERROR],  # Allow power-off from swing
-        STATE_HIT: [STATE_IDLE, STATE_TRANSITION, STATE_ERROR],    # Allow power-off from hit
+        STATE_SWING: [STATE_IDLE, STATE_TRANSITION, STATE_ERROR],
+        STATE_HIT: [STATE_IDLE, STATE_TRANSITION, STATE_ERROR],
         STATE_TRANSITION: [STATE_OFF, STATE_IDLE, STATE_SWING, STATE_HIT, STATE_ERROR],
         STATE_ERROR: [STATE_OFF],
     }
 
     # Display timing
-    DISPLAY_TIMEOUT_SAVER_ON = UserConfig.DISPLAY_TIMEOUT_SAVER
-    DISPLAY_TIMEOUT_SAVER_OFF = UserConfig.DISPLAY_TIMEOUT_NORMAL
-    IMAGE_DISPLAY_DURATION_SAVER_ON = 1.5
-    IMAGE_DISPLAY_DURATION_SAVER_OFF = 3.0
+    DISPLAY_TIMEOUT = UserConfig.DISPLAY_TIMEOUT_NORMAL
+    IMAGE_DISPLAY_DURATION = 3.0
 
     # Animation timing
     POWER_ON_DURATION = 1.7
@@ -218,48 +223,8 @@ class SaberConfig:
 
 
 # =============================================================================
-# AUDIO UTILITIES
-# =============================================================================
-
-class AudioUtils:
-    """Static audio processing helpers."""
-
-    @staticmethod
-    def scale_sample(sample, volume_percent):
-        """Scale audio sample by volume (0-100). Clamps to 16-bit range."""
-        if volume_percent >= 100:
-            return sample
-        if volume_percent <= 0:
-            return 0
-        scaled = int(sample * volume_percent / 100)
-        return max(-32768, min(32767, scaled))
-
-    @staticmethod
-    def apply_fade_envelope(samples, fade_in_samples=100, fade_out_samples=100):
-        """Apply fade in/out to prevent audio clicks. Modifies in place."""
-        sample_count = len(samples)
-
-        # Fade in
-        for i in range(min(fade_in_samples, sample_count)):
-            samples[i] = int(samples[i] * (i / fade_in_samples))
-
-        # Fade out
-        start_fade_out = max(0, sample_count - fade_out_samples)
-        for i in range(start_fade_out, sample_count):
-            samples[i] = int(samples[i] * ((sample_count - i) / fade_out_samples))
-
-        return samples
-
-    @staticmethod
-    def create_silence(duration_ms, sample_rate=22050):
-        """Create silent audio buffer."""
-        num_samples = int((duration_ms / 1000.0) * sample_rate)
-        silence = array.array("h", [0] * num_samples)
-        return audiocore.RawSample(silence, sample_rate=sample_rate)
-
-
-# =============================================================================
 # PERSISTENT SETTINGS (NVM Storage)
+# Saves settings to chip memory so they survive power-off
 # =============================================================================
 
 class PersistentSettings:
@@ -663,9 +628,9 @@ class SaberDisplay:
 
         self.display_start_time = 0
         self.display_active = False
-        self.display_timeout = SaberConfig.DISPLAY_TIMEOUT_SAVER_OFF
+        self.display_timeout = SaberConfig.DISPLAY_TIMEOUT
         self.get_battery_voltage_pct = battery_voltage_ref
-        self.image_display_duration = SaberConfig.IMAGE_DISPLAY_DURATION_SAVER_OFF
+        self.image_display_duration = SaberConfig.IMAGE_DISPLAY_DURATION
 
         self.turn_off_screen()
 
@@ -675,136 +640,71 @@ class SaberDisplay:
         except Exception as e:
             print("Error turning off screen:", e)
 
-    def update_display_timeout(self, timeout):
-        self.display_timeout = timeout
+    def _show_status_with_bar(self, title, value, color, bar_width=None):
+        """Helper: Show status text with optional progress bar.
 
-    def update_image_display_duration(self, duration):
-        self.image_display_duration = duration
-
-    def update_power_saver_settings(self, saver_on):
+        Args:
+            title: Label text (e.g., "VOLUME: 70%")
+            value: Numeric value for bar width (0-100), or None to skip bar
+            color: Hex color for text and bar (e.g., 0x00FF00 for green)
+            bar_width: Override bar width (default: use value directly)
+        """
         try:
-            if saver_on:
-                self.update_display_timeout(UserConfig.DISPLAY_TIMEOUT_SAVER)
-                board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS_SAVER
-            else:
-                self.update_display_timeout(UserConfig.DISPLAY_TIMEOUT_NORMAL)
-                board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
+            # Clear previous display content
+            while len(self.main_group):
+                self.main_group.pop()
+
+            # Add text label
+            text_label = label.Label(
+                terminalio.FONT, text=title, scale=2, color=color, x=10, y=30)
+            self.main_group.append(text_label)
+
+            # Add progress bar if value provided
+            if value is not None:
+                width = bar_width if bar_width is not None else max(1, min(value, 100))
+                bar_group = displayio.Group()
+
+                # Gray background bar
+                bg_palette = displayio.Palette(1)
+                bg_palette[0] = 0x444444
+                bg_bitmap = displayio.Bitmap(100, 14, 1)
+                bg_bitmap.fill(0)
+                bar_group.append(displayio.TileGrid(bg_bitmap, pixel_shader=bg_palette, x=14, y=46))
+
+                # Colored fill bar
+                fill_palette = displayio.Palette(1)
+                fill_palette[0] = color
+                fill_bitmap = displayio.Bitmap(width, 10, 1)
+                fill_bitmap.fill(0)
+                bar_group.append(displayio.TileGrid(fill_bitmap, pixel_shader=fill_palette, x=16, y=48))
+
+                self.main_group.append(bar_group)
+
+            # Show on display
+            board.DISPLAY.root_group = self.main_group
+            board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
+            self.display_start_time = time.monotonic()
+            self.display_active = True
         except Exception as e:
-            print("Error updating power saver settings:", e)
+            print("Error showing status:", e)
 
     def show_battery_status(self):
         """Show battery percentage with progress bar."""
-        try:
-            while len(self.main_group):
-                self.main_group.pop()
-
-            battery_percent = self.get_battery_voltage_pct()
-            battery_text = "BATTERY: {}".format(
-                "USB" if battery_percent == "USB" else "{}%".format(battery_percent))
-
-            battery_label = label.Label(
-                terminalio.FONT, text=battery_text, scale=2,
-                color=0xFFFFFF, x=10, y=30)
-            self.main_group.append(battery_label)
-
-            if battery_percent != "USB":
-                battery_bar_width = max(1, min(battery_percent, 100))
-                battery_group = displayio.Group()
-
-                bg_palette = displayio.Palette(1)
-                bg_palette[0] = 0x444444
-                bat_bg_bitmap = displayio.Bitmap(100, 14, 1)
-                bat_bg_bitmap.fill(0)
-                bg_tile = displayio.TileGrid(bat_bg_bitmap, pixel_shader=bg_palette, x=14, y=46)
-                battery_group.append(bg_tile)
-
-                bat_palette = displayio.Palette(1)
-                bat_palette[0] = 0xFFFF00
-                bat_bitmap = displayio.Bitmap(battery_bar_width, 10, 1)
-                bat_bitmap.fill(0)
-                bat_tile = displayio.TileGrid(bat_bitmap, pixel_shader=bat_palette, x=16, y=48)
-                battery_group.append(bat_tile)
-                self.main_group.append(battery_group)
-
-            board.DISPLAY.root_group = self.main_group
-            board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
-            self.display_start_time = time.monotonic()
-            self.display_active = True
-        except Exception as e:
-            print("Error showing battery status:", e)
+        battery = self.get_battery_voltage_pct()
+        if battery == "USB":
+            self._show_status_with_bar("BATTERY: USB", None, 0xFFFFFF)
+        else:
+            self._show_status_with_bar("BATTERY: {}%".format(battery), battery, 0xFFFF00)
 
     def show_volume_status(self, volume_percent):
         """Show volume with progress bar."""
-        try:
-            while len(self.main_group):
-                self.main_group.pop()
-
-            volume_label = label.Label(
-                terminalio.FONT, text="VOLUME: {}%".format(volume_percent),
-                scale=2, color=0x00FF00, x=10, y=30)
-            self.main_group.append(volume_label)
-
-            volume_bar_width = max(1, min(volume_percent, 100))
-            volume_group = displayio.Group()
-
-            bg_palette = displayio.Palette(1)
-            bg_palette[0] = 0x444444
-            vol_bg_bitmap = displayio.Bitmap(100, 14, 1)
-            vol_bg_bitmap.fill(0)
-            bg_tile = displayio.TileGrid(vol_bg_bitmap, pixel_shader=bg_palette, x=14, y=46)
-            volume_group.append(bg_tile)
-
-            vol_palette = displayio.Palette(1)
-            vol_palette[0] = 0x00FF00
-            vol_bitmap = displayio.Bitmap(volume_bar_width, 10, 1)
-            vol_bitmap.fill(0)
-            vol_tile = displayio.TileGrid(vol_bitmap, pixel_shader=vol_palette, x=16, y=48)
-            volume_group.append(vol_tile)
-            self.main_group.append(volume_group)
-
-            board.DISPLAY.root_group = self.main_group
-            board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
-            self.display_start_time = time.monotonic()
-            self.display_active = True
-        except Exception as e:
-            print("Error showing volume status:", e)
+        self._show_status_with_bar("VOLUME: {}%".format(volume_percent), volume_percent, 0x00FF00)
 
     def show_brightness_status(self, brightness_percent):
-        """Show brightness with progress bar."""
-        try:
-            while len(self.main_group):
-                self.main_group.pop()
-
-            brightness_label = label.Label(
-                terminalio.FONT, text="BRIGHT: {}%".format(brightness_percent),
-                scale=2, color=0xFFFF00, x=10, y=30)
-            self.main_group.append(brightness_label)
-
-            # Scale to 0-100 for bar width (presets are 15-35%, scale to fill bar)
-            bar_width = max(1, min(int(brightness_percent * 2.5), 100))
-            brightness_group = displayio.Group()
-
-            bg_palette = displayio.Palette(1)
-            bg_palette[0] = 0x444444
-            bright_bg_bitmap = displayio.Bitmap(100, 14, 1)
-            bright_bg_bitmap.fill(0)
-            bg_tile = displayio.TileGrid(bright_bg_bitmap, pixel_shader=bg_palette, x=14, y=46)
-            brightness_group.append(bg_tile)
-
-            bright_palette = displayio.Palette(1)
-            bright_palette[0] = 0xFFFF00
-            bright_bitmap = displayio.Bitmap(bar_width, 10, 1)
-            bright_bitmap.fill(0)
-            bright_tile = displayio.TileGrid(bright_bitmap, pixel_shader=bright_palette, x=16, y=48)
-            brightness_group.append(bright_tile)
-            self.main_group.append(brightness_group)
-
-            board.DISPLAY.root_group = self.main_group
-            board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
-            self.display_start_time = time.monotonic()
-            self.display_active = True
-        except Exception as e:
-            print("Error showing brightness status:", e)
+        """Show brightness with progress bar (scaled for 15-35% range)."""
+        # Scale brightness to fill bar (15% -> ~38, 35% -> ~88)
+        bar_width = max(1, min(int(brightness_percent * 2.5), 100))
+        self._show_status_with_bar("BRIGHT: {}%".format(brightness_percent), brightness_percent, 0xFFFF00, bar_width)
 
     def _evict_oldest_image(self):
         """Remove oldest image from cache (LRU eviction)."""
@@ -938,8 +838,6 @@ class SaberController:
         self.audio = AudioManager(speaker_enable=self.hw.speaker_enable)
         self.display = SaberDisplay(self._get_battery_percentage, audio_manager=self.audio)
 
-        self.power_saver_mode = False
-        self.cpu_loop_delay = UserConfig.ACTIVE_LOOP_DELAY
         self.mode = SaberConfig.STATE_OFF
 
         # Load persistent settings
@@ -966,12 +864,13 @@ class SaberController:
         self.last_accel_recovery_attempt = 0
         self.last_led_update = 0  # LED frame rate limiter
 
-        # Per-input touch state (independent debouncing for each button)
+        # Touch button state tracking (for debouncing and long-press detection)
+        # Each button tracks: when last triggered, when press started, if it's a long press
+        def new_touch_state():
+            return {'last_time': 0, 'press_start': 0, 'is_long_press': False}
         self.touch_state = {
-            'left': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
-            'right': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
-            'a3': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
-            'a4': {'last_time': 0, 'press_start': 0, 'is_long_press': False},
+            'left': new_touch_state(), 'right': new_touch_state(),
+            'a3': new_touch_state(), 'a4': new_touch_state()
         }
 
         # Error tracking
@@ -992,7 +891,6 @@ class SaberController:
         self._init_watchdog()
 
         self._update_theme_colors()
-        self._apply_power_mode()
         self.display.turn_off_screen()
         print("SaberController init complete.\n")
 
@@ -1016,19 +914,6 @@ class SaberController:
                 self.watchdog.feed()
             except Exception:
                 pass
-
-    def _apply_power_mode(self):
-        if self.power_saver_mode:
-            self.display.update_power_saver_settings(True)
-            self.cpu_loop_delay = 0.03
-        else:
-            self.display.update_power_saver_settings(False)
-            self.cpu_loop_delay = UserConfig.ACTIVE_LOOP_DELAY
-
-    def toggle_power_mode(self):
-        self.power_saver_mode = not self.power_saver_mode
-        self._apply_power_mode()
-        print("Power saver:", "ON" if self.power_saver_mode else "OFF")
 
     def _get_battery_percentage(self):
         """Get battery percentage (returns "USB" if plugged in)."""
