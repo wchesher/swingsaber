@@ -94,6 +94,7 @@ class UserConfig:
     # Max safe brightness ~40% with 1781 battery (1A current limit)
     #
     BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]  # 15%, 25%, 35%
+    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25        # Default brightness (25%)
     NEOPIXEL_IDLE_BRIGHTNESS = 0.05          # Dim glow when idle (5%)
 
     # ==========================================================================
