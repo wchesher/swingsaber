@@ -51,73 +51,118 @@ except ImportError:
 
 
 # =============================================================================
-# USER CONFIGURATION - Adjustable settings
+# USER SETTINGS - Customize these to make the saber your own!
 # =============================================================================
 
 class UserConfig:
-    """User-adjustable settings. Modify these to customize behavior."""
+    """Settings you'll want to customize. Most important ones are at the top!"""
 
-    # Display (0.0-1.0 brightness)
-    DISPLAY_BRIGHTNESS = 0.3
-    DISPLAY_TIMEOUT_NORMAL = 2.0   # Seconds before auto-off
+    # ==========================================================================
+    # THEMES - Your saber's personality! Change colors and sounds here.
+    # ==========================================================================
+    # Each theme needs matching sound files in /sounds folder:
+    #   0on.wav, 0off.wav, 0idle.wav, 0swing.wav, 0hit.wav, 0switch.wav
+    #   1on.wav, 1off.wav, etc. (number matches theme index)
+    #
+    # Colors are RGBW format: (Red, Green, Blue, White) each 0-255
+    #   Red only:    (255, 0, 0, 0)
+    #   Green only:  (0, 255, 0, 0)
+    #   Blue only:   (0, 0, 255, 0)
+    #   Purple:      (255, 0, 255, 0)
+    #   White:       (0, 0, 0, 255) or (255, 255, 255, 255)
+    #
+    THEMES = [
+        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
+        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
+        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0)},
+        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
+    ]
 
-    # NeoPixel brightness (lower = less power, longer battery)
-    # Max safe brightness ~40% with 1781 battery (1A limit)
-    NEOPIXEL_IDLE_BRIGHTNESS = 0.05   # 5% when idle
-    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25 # 25% default (middle preset)
+    # ==========================================================================
+    # MOTION SENSITIVITY - How easily swings and hits trigger
+    # ==========================================================================
+    # Watch console output to tune: "delta: 5.2 (swing>15 hit>40)"
+    # Lower = more sensitive, Higher = needs bigger movements
+    #
+    SWING_THRESHOLD = 15    # Gentle swing triggers at this level
+    HIT_THRESHOLD = 40      # Hard impact/clash triggers at this level
+
+    # ==========================================================================
+    # BRIGHTNESS - How bright the blade glows
+    # ==========================================================================
+    # Long-press RIGHT button to cycle through these presets
+    # Max safe brightness ~40% with 1781 battery (1A current limit)
+    #
     BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]  # 15%, 25%, 35%
-    # LED update rate limiting (prevents audio lag from NeoPixel blocking)
-    # 60 RGBW LEDs @ 800kHz = ~2.4ms blocking per update
-    LED_UPDATE_INTERVAL = 0.05  # 50ms = 20 FPS max (gives audio DMA breathing room)
+    NEOPIXEL_IDLE_BRIGHTNESS = 0.05          # Dim glow when idle (5%)
 
-    # Main loop timing (balance responsiveness vs audio quality)
-    # Faster loops can interfere with audio DMA on SAMD51
-    IDLE_LOOP_DELAY = 0.05    # 50ms idle (20 Hz)
-    ACTIVE_LOOP_DELAY = 0.025 # 25ms active (40 Hz) - gives audio DMA more time
+    # ==========================================================================
+    # VOLUME - Sound levels
+    # ==========================================================================
+    # Long-press LEFT button to cycle through these presets
+    #
+    VOLUME_PRESETS = [30, 50, 70, 100]  # Quiet, Medium, Loud, Max
+    DEFAULT_VOLUME = 70
 
-    # Audio
-    STOP_AUDIO_WHEN_IDLE = True
-    DEFAULT_VOLUME = 70        # 0-100%
-    VOLUME_STEP = 10
+    # ==========================================================================
+    # DISPLAY - Screen settings
+    # ==========================================================================
+    DISPLAY_BRIGHTNESS = 0.3       # Screen brightness (0.0-1.0)
+    DISPLAY_TIMEOUT_NORMAL = 2.0   # Seconds before screen auto-off
+
+    # ==========================================================================
+    # LESS COMMON SETTINGS - You probably don't need to change these
+    # ==========================================================================
+
+    # Volume fine-tuning
+    VOLUME_STEP = 10    # How much A3/A4 long-press changes volume
     MIN_VOLUME = 10
     MAX_VOLUME = 100
-    # Audio fade duration for smooth transitions
-    FADE_TRANSITION_DURATION = 0.1  # 100ms fade for smoother transitions
-    VOLUME_PRESETS = [30, 50, 70, 100]
+
+    # Console output (set to False to hide accelerometer readings)
+    ENABLE_DIAGNOSTICS = True
+    ACCEL_OUTPUT_INTERVAL = 0.5   # How often to show accel values (seconds)
+
+    # Touch input timing
+    TOUCH_DEBOUNCE_TIME = 0.02  # Ignore rapid re-triggers (20ms)
+    LONG_PRESS_TIME = 1.0       # Hold time for long press (1 second)
+
+    # ==========================================================================
+    # ADVANCED SETTINGS - Only change if you know what you're doing
+    # ==========================================================================
+
+    # Loop timing (affects responsiveness vs audio quality)
+    IDLE_LOOP_DELAY = 0.05      # 50ms between checks when idle
+    ACTIVE_LOOP_DELAY = 0.025   # 25ms between checks when active
+    LED_UPDATE_INTERVAL = 0.05  # 50ms between LED updates (20 FPS)
+
+    # Audio processing
+    STOP_AUDIO_WHEN_IDLE = True
+    FADE_TRANSITION_DURATION = 0.1  # Audio fade time (100ms)
     AUDIO_SAMPLE_RATE = 16000
-    AUDIO_BITS_PER_SAMPLE = 8  # 8-bit unsigned for less CPU load
+    AUDIO_BITS_PER_SAMPLE = 8
 
-    # Motion detection
-    NEAR_SWING_RATIO = 0.8  # 80% threshold for "almost" detection
-
-    # Touch input
-    TOUCH_DEBOUNCE_TIME = 0.02  # 20ms - ignore rapid re-triggers
-    LONG_PRESS_TIME = 1.0       # 1 second hold = long press
+    # Battery monitoring
+    BATTERY_CHECK_INTERVAL = 30.0    # Check every 30 seconds
+    BATTERY_WARNING_THRESHOLD = 15   # Warn at 15%
+    BATTERY_CRITICAL_THRESHOLD = 5   # Critical at 5%
+    BATTERY_WARNING_INTERVAL = 60.0  # Don't spam warnings
 
     # Memory management
     MAX_IMAGE_CACHE_SIZE = 4
-    GC_INTERVAL = 10.0              # Garbage collection interval
-    CRITICAL_MEMORY_THRESHOLD = 8192  # Force GC below 8KB free
-
-    # Monitoring
-    ENABLE_DIAGNOSTICS = True
-    ACCEL_OUTPUT_INTERVAL = 0.5     # Show accel values every 0.5s for tuning
-    BATTERY_CHECK_INTERVAL = 30.0
-    BATTERY_WARNING_THRESHOLD = 15   # Warn at 15%
-    BATTERY_CRITICAL_THRESHOLD = 5   # Critical at 5%
-    BATTERY_WARNING_INTERVAL = 60.0
+    GC_INTERVAL = 10.0
+    CRITICAL_MEMORY_THRESHOLD = 8192
 
     # Error recovery
     MAX_ACCEL_ERRORS = 10
     ERROR_RECOVERY_DELAY = 0.1
-    ACCEL_RECOVERY_INTERVAL = 30.0  # Try to recover accelerometer
+    ACCEL_RECOVERY_INTERVAL = 30.0
 
-    # Watchdog
+    # Watchdog (auto-reset if code freezes)
     ENABLE_WATCHDOG = True
-    WATCHDOG_TIMEOUT = 8.0  # Reset if stuck for 8 seconds
+    WATCHDOG_TIMEOUT = 8.0
 
-    # Persistent settings (NVM - survives power-off)
-    # Magic byte validates stored data isn't garbage
+    # Persistent storage addresses (don't change)
     ENABLE_PERSISTENT_SETTINGS = True
     NVM_THEME_OFFSET = 0
     NVM_VOLUME_OFFSET = 1
@@ -140,20 +185,7 @@ class SaberConfig:
 
     # NeoPixel LED strip (Adafruit 4914: RGBW strip, 60 LEDs per meter)
     NUM_PIXELS = 60
-
-    # ==========================================================================
-    # MOTION SENSITIVITY - Adjust these to tune swing/hit detection
-    # ==========================================================================
-    # These measure how much the acceleration CHANGED since last reading.
-    # At rest: ~0 (no change). Moving: higher values.
-    # Lower number = more sensitive (triggers more easily)
-    # Higher number = less sensitive (needs bigger movements)
-    #
-    # Watch the console output to see your values and tune accordingly:
-    #   "delta: 5.2 (swing>15 hit>40)" means current reading is 5.2
-    #
-    SWING_THRESHOLD = 15    # Gentle swing triggers at this level
-    HIT_THRESHOLD = 40      # Hard impact/clash triggers at this level
+    IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25% of full brightness
 
     # ==========================================================================
     # STATE MACHINE - The saber is always in exactly ONE of these states
@@ -210,17 +242,6 @@ class SaberConfig:
     FADE_IN_SAMPLES = 100
     FADE_OUT_SAMPLES = 100
 
-    # Themes: name, blade color (RGBW), hit/clash color
-    # RGBW format: (Red, Green, Blue, White) - White channel adds brightness
-    THEMES = [
-        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
-        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
-        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0)},
-        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
-    ]
-
-    IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25%
-
 
 # =============================================================================
 # PERSISTENT SETTINGS (NVM Storage)
@@ -247,7 +268,7 @@ class PersistentSettings:
             return 0
         try:
             theme = microcontroller.nvm[UserConfig.NVM_THEME_OFFSET]
-            if theme < len(SaberConfig.THEMES):
+            if theme < len(UserConfig.THEMES):
                 return theme
         except Exception:
             pass
@@ -942,14 +963,14 @@ class SaberController:
 
     def _update_theme_colors(self):
         """Update RGBW colors from current theme."""
-        theme = SaberConfig.THEMES[self.theme_index]
+        theme = UserConfig.THEMES[self.theme_index]
         # Dim all 4 RGBW channels for idle color
         self.color_idle = tuple(int(c / SaberConfig.IDLE_COLOR_DIVISOR) for c in theme["color"])
         self.color_swing = theme["color"]
         self.color_hit = theme["hit_color"]
 
     def cycle_theme(self):
-        self.theme_index = (self.theme_index + 1) % len(SaberConfig.THEMES)
+        self.theme_index = (self.theme_index + 1) % len(UserConfig.THEMES)
         self._update_theme_colors()
 
     def cycle_brightness_preset(self):
@@ -1272,10 +1293,10 @@ class SaberController:
                 self.last_accel_output = now
                 print("delta: {:.1f} (swing>{} hit>{})".format(
                     delta_mag_sq,
-                    SaberConfig.SWING_THRESHOLD,
-                    SaberConfig.HIT_THRESHOLD))
+                    UserConfig.SWING_THRESHOLD,
+                    UserConfig.HIT_THRESHOLD))
 
-        if delta_mag_sq > SaberConfig.HIT_THRESHOLD:
+        if delta_mag_sq > UserConfig.HIT_THRESHOLD:
             print(">>> HIT: {:.1f}".format(delta_mag_sq))
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
@@ -1290,7 +1311,7 @@ class SaberController:
             self._transition_to_state(SaberConfig.STATE_HIT)
             return True
 
-        elif delta_mag_sq > SaberConfig.SWING_THRESHOLD:
+        elif delta_mag_sq > UserConfig.SWING_THRESHOLD:
             print(">> SWING: {:.1f}".format(delta_mag_sq))
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
@@ -1454,7 +1475,7 @@ class SaberController:
         """Main event loop."""
         print("=== SABER READY ===")
         print("Delta thresholds: swing>{}, hit>{} (rest~0)".format(
-            SaberConfig.SWING_THRESHOLD, SaberConfig.HIT_THRESHOLD))
+            UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
         print("Controls: RIGHT=power, LEFT=theme")
         print("Long: RIGHT=bright, LEFT=vol, A3=vol+, A4=vol-")
         print()
