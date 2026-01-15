@@ -227,6 +227,9 @@ class SaberConfig:
     FADE_OUT_DURATION = 0.5
     SWING_BLEND_MIDPOINT = 0.5
     SWING_BLEND_SCALE = 2.0
+    # Fallback durations when audio files are missing
+    SWING_DURATION_NO_AUDIO = 0.5  # Swing animation without audio
+    HIT_DURATION_NO_AUDIO = 0.8    # Hit animation without audio
 
     # Battery (LiPo: 3.3V empty, 4.2V full)
     BATTERY_VOLTAGE_SAMPLES = 10
@@ -540,44 +543,39 @@ class AudioManager:
         try:
             wave_file = open(filename, "rb")
             wav = audiocore.WaveFile(wave_file)
-            print("  WAV: {}Hz, {}ch, {}bit".format(
-                wav.sample_rate, wav.channel_count, wav.bits_per_sample))
             return (wave_file, wav)
         except OSError:
-            print("Audio file not found:", filename)
+            # Audio file not found - this is OK, device works without sounds
+            print("  (no audio: {})".format(filename))
             return (None, None)
         except Exception as e:
-            print("Error loading audio:", e)
+            print("  Audio error:", e)
             return (None, None)
 
     def play_audio_clip(self, theme_index, name, loop=False):
-        """Play audio clip directly. File naming: sounds/[theme][name].wav"""
+        """Play audio clip. Works even if file is missing."""
         if not self.audio:
-            print("No audio available!")
             return False
 
         # Stop current playback and let DMA settle
         if self.audio.playing:
             self.audio.stop()
-            time.sleep(0.01)  # Let audio DMA fully stop
+            time.sleep(0.01)
         self._close_current_file()
 
-        # Force GC before allocating new audio buffer
         gc.collect()
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
-        print("Playing:", filename)
         self.current_wave_file, self.current_wav = self._load_and_process_wav(filename)
 
         if self.current_wav is None:
-            return False
+            return False  # File not found - that's OK
 
         try:
             self.audio.play(self.current_wav, loop=loop)
-            print("  Playing! loop={}".format(loop))
             return True
         except Exception as e:
-            print("Error playing audio:", e)
+            print("Audio play error:", e)
             self._close_current_file()
             return False
 
@@ -758,8 +756,12 @@ class SaberDisplay:
             self.image_cache[cache_key] = tile_grid
             self.image_cache_order.append(cache_key)
             return tile_grid
+        except OSError:
+            # Image file not found - this is OK, device works without images
+            print("(no image: {})".format(filename))
+            return None
         except Exception as e:
-            print("Error loading image {}: {}".format(filename, e))
+            print("Image error {}: {}".format(filename, e))
             return None
 
     def show_image(self, theme_index, image_type="logo", duration=None):
@@ -1329,22 +1331,31 @@ class SaberController:
         return False
 
     def _update_swing_hit_animation(self):
-        """Blend colors during swing/hit animation."""
+        """Blend colors during swing/hit animation.
+
+        Works with or without audio files:
+        - With audio: animation runs while audio plays
+        - Without audio: uses fallback duration timers
+        """
         if self.mode not in (SaberConfig.STATE_SWING, SaberConfig.STATE_HIT):
             return
 
-        if self.audio.audio and self.audio.audio.playing:
-            elapsed = time.monotonic() - self.event_start_time
-            # Blend: 0 = full active color (swing/hit), 1 = full idle color
-            # Start with active color, fade to idle over time
-            if self.mode == SaberConfig.STATE_SWING:
-                # Swing: fast fade from swing color to idle (0.5 seconds)
-                blend = min(elapsed * 2.0, 1.0)
-            else:
-                # Hit: slower fade from hit color to idle (1 second)
-                blend = min(elapsed, 1.0)
+        elapsed = time.monotonic() - self.event_start_time
+        audio_playing = self.audio.audio and self.audio.audio.playing
+
+        # Determine if animation should continue (audio playing OR within fallback duration)
+        if self.mode == SaberConfig.STATE_SWING:
+            fallback_duration = SaberConfig.SWING_DURATION_NO_AUDIO
+            blend = min(elapsed * 2.0, 1.0)  # 0.5 second blend
+        else:
+            fallback_duration = SaberConfig.HIT_DURATION_NO_AUDIO
+            blend = min(elapsed, 1.0)  # 1 second blend
+
+        # Continue animation if audio playing OR still within fallback time
+        if audio_playing or elapsed < fallback_duration:
             self._fill_blend(self.color_active, self.color_idle, blend)
         else:
+            # Animation done - return to idle
             self.audio.play_audio_clip(self.theme_index, "idle", loop=True)
             if self.hw.strip:
                 try:
