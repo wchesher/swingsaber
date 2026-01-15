@@ -104,6 +104,7 @@ class UserConfig:
 
     # Monitoring
     ENABLE_DIAGNOSTICS = True
+    ACCEL_OUTPUT_INTERVAL = 0.5     # Show accel values every 0.5s for tuning
     BATTERY_CHECK_INTERVAL = 30.0
     BATTERY_WARNING_THRESHOLD = 15   # Warn at 15%
     BATTERY_CRITICAL_THRESHOLD = 5   # Critical at 5%
@@ -155,6 +156,16 @@ class SaberConfig:
     STATE_HIT = 3
     STATE_TRANSITION = 4
     STATE_ERROR = 5
+
+    # State names for console output
+    STATE_NAMES = {
+        0: "OFF",
+        1: "IDLE",
+        2: "SWING",
+        3: "HIT",
+        4: "TRANS",
+        5: "ERROR",
+    }
 
     # Valid state transitions (prevents invalid states)
     VALID_TRANSITIONS = {
@@ -833,7 +844,6 @@ class SaberDisplay:
         """Display theme image (blocking, mutes audio to reduce display whine)."""
         if duration is None:
             duration = self.image_display_duration
-            print("\n" * 40)
 
         # Mute speaker during display refresh to reduce electrical noise
         if self.audio_manager:
@@ -867,7 +877,6 @@ class SaberDisplay:
         """Display theme image non-blocking (for use with simultaneous audio)."""
         if duration is None:
             duration = self.image_display_duration
-            print("\n" * 40)
 
         try:
             while len(self.main_group):
@@ -972,6 +981,7 @@ class SaberController:
         # Diagnostics
         self.loop_count = 0
         self.state_changes = 0
+        self.last_accel_output = 0
 
         # Watchdog
         self.watchdog = None
@@ -1070,14 +1080,19 @@ class SaberController:
 
         valid_next_states = SaberConfig.VALID_TRANSITIONS.get(self.mode, [])
         if new_state not in valid_next_states:
-            print("INVALID TRANSITION: {} -> {}".format(self.mode, new_state))
+            old_name = SaberConfig.STATE_NAMES.get(self.mode, str(self.mode))
+            new_name = SaberConfig.STATE_NAMES.get(new_state, str(new_state))
+            print("INVALID: {} -> {}".format(old_name, new_name))
             return False
 
         old_state = self.mode
         self.mode = new_state
         self.state_changes += 1
-        if UserConfig.ENABLE_DIAGNOSTICS:
-            print("State: {} -> {}".format(old_state, new_state))
+        # Always show state transitions (except to/from TRANSITION state for cleaner output)
+        if old_state != SaberConfig.STATE_TRANSITION and new_state != SaberConfig.STATE_TRANSITION:
+            old_name = SaberConfig.STATE_NAMES.get(old_state, str(old_state))
+            new_name = SaberConfig.STATE_NAMES.get(new_state, str(new_state))
+            print("[{}->{}]".format(old_name, new_name))
         return True
 
     def _animate_power(self, name, duration, reverse):
@@ -1347,10 +1362,20 @@ class SaberController:
             return False
 
         accel_magnitude_sq, accel_x, accel_y, accel_z = accel_data
-        near_swing_threshold = UserConfig.NEAR_SWING_RATIO * SaberConfig.SWING_THRESHOLD
+        now = time.monotonic()
+
+        # Periodic accel output for threshold tuning
+        if UserConfig.ENABLE_DIAGNOSTICS:
+            if now - self.last_accel_output >= UserConfig.ACCEL_OUTPUT_INTERVAL:
+                self.last_accel_output = now
+                # Show mag² relative to thresholds: swing=105, hit=135, rest~96
+                print("accel: {:.0f} (swing>{} hit>{})".format(
+                    accel_magnitude_sq,
+                    SaberConfig.SWING_THRESHOLD,
+                    SaberConfig.HIT_THRESHOLD))
 
         if accel_magnitude_sq > SaberConfig.HIT_THRESHOLD:
-            print("HIT: Mag²={:.1f}".format(accel_magnitude_sq))
+            print(">>> HIT: {:.0f}".format(accel_magnitude_sq))
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
             while not self.audio.update_fade():
@@ -1365,7 +1390,7 @@ class SaberController:
             return True
 
         elif accel_magnitude_sq > SaberConfig.SWING_THRESHOLD:
-            print("SWING: Mag²={:.1f}".format(accel_magnitude_sq))
+            print(">> SWING: {:.0f}".format(accel_magnitude_sq))
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self.audio.start_fade_out()
             while not self.audio.update_fade():
@@ -1378,10 +1403,6 @@ class SaberController:
             self.last_led_update = 0  # Force immediate LED update
             self._transition_to_state(SaberConfig.STATE_SWING)
             return True
-
-        elif accel_magnitude_sq > near_swing_threshold:
-            if UserConfig.ENABLE_DIAGNOSTICS and self.loop_count % 10 == 0:
-                print("ALMOST: Mag²={:.1f}".format(accel_magnitude_sq))
 
         return False
 
@@ -1531,12 +1552,10 @@ class SaberController:
     def run(self):
         """Main event loop."""
         print("=== SABER READY ===")
-        print("Controls: RIGHT=power, LEFT=theme, A3/A4=battery")
-        print("Long press: RIGHT=brightness, LEFT=vol presets, A3=vol+, A4=vol-")
-        if UserConfig.ENABLE_PERSISTENT_SETTINGS:
-            print("Settings persist across reboots")
-        if self.watchdog:
-            print("Watchdog: {}s".format(UserConfig.WATCHDOG_TIMEOUT))
+        print("Thresholds: swing>{}, hit>{} (rest~96)".format(
+            SaberConfig.SWING_THRESHOLD, SaberConfig.HIT_THRESHOLD))
+        print("Controls: RIGHT=power, LEFT=theme")
+        print("Long: RIGHT=bright, LEFT=vol, A3=vol+, A4=vol-")
         print()
 
         try:
