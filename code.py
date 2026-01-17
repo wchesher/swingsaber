@@ -137,12 +137,6 @@ class UserConfig:
     ACTIVE_LOOP_DELAY = 0.025   # 25ms between checks when active
     LED_UPDATE_INTERVAL = 0.05  # 50ms between LED updates (20 FPS)
 
-    # Audio processing
-    STOP_AUDIO_WHEN_IDLE = True
-    FADE_TRANSITION_DURATION = 0.1  # Audio fade time (100ms)
-    AUDIO_SAMPLE_RATE = 16000
-    AUDIO_BITS_PER_SAMPLE = 8
-
     # Battery monitoring
     BATTERY_CHECK_INTERVAL = 30.0    # Check every 30 seconds
     BATTERY_WARNING_THRESHOLD = 15   # Warn at 15%

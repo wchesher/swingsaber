@@ -1,9 +1,9 @@
-# swingsaber v1.0
+# swingsaber v1.1
 
 **Interactive lightsaber controller for Adafruit HalloWing M4 Express**
 
 ![CircuitPython](https://img.shields.io/badge/CircuitPython-10.x-blueviolet.svg)
-![Version](https://img.shields.io/badge/version-1.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.1-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 **Originally by:** [John Park (Adafruit Industries)](https://learn.adafruit.com/hallowing-lightsaber)
@@ -16,7 +16,7 @@
 An interactive lightsaber controller that turns the HalloWing M4 into a fully-functional lightsaber with:
 
 - **Motion Detection**: Swing and hit detection via 3-axis accelerometer
-- **LED Blade**: 30-pixel NeoPixel strip with color animations
+- **LED Blade**: 60-pixel RGBW NeoPixel strip with color animations
 - **Sound System**: 4 complete themes with PWM audio
 - **Touch Controls**: Power, theme switching, battery status
 - **Reliable**: Error handling and resource management
@@ -31,7 +31,7 @@ Based on the [Adafruit HalloWing Lightsaber guide](https://learn.adafruit.com/ha
 
 **Required:**
 - [Adafruit HalloWing M4 Express](https://www.adafruit.com/product/4300)
-- [NeoPixel Strip 0.5m (30 pixels)](https://www.adafruit.com/product/1376) with 3-pin JST connector
+- [NeoPixel Strip RGBW (60 pixels)](https://www.adafruit.com/product/2842) with 3-pin JST connector
 - [Mini Oval Speaker (8Ω 1W)](https://www.adafruit.com/product/3923)
 - [LiPo Battery 3.7V 500mAh](https://www.adafruit.com/product/1578) (or larger)
 - USB-C cable for programming
@@ -120,9 +120,14 @@ CIRCUITPY/
 | Button | Action | Function |
 |--------|--------|----------|
 | **RIGHT (D4)** | Tap | Power lightsaber ON/OFF |
+| **RIGHT (D4)** | Long press | Cycle brightness presets (15%/25%/35%) |
 | **LEFT (D3)** | Tap (OFF) | Cycle theme |
 | **LEFT (D3)** | Tap (ON) | Power off, then cycle theme |
-| **A3/A4** | Tap | Show battery status |
+| **LEFT (D3)** | Long press | Cycle volume presets (30/50/70/100%) |
+| **A3** | Tap | Show battery status |
+| **A3** | Long press | Volume up (+10%) |
+| **A4** | Tap | Show battery status |
+| **A4** | Long press | Volume down (-10%) |
 
 ### Themes
 
@@ -133,9 +138,13 @@ CIRCUITPY/
 
 ### Motion Detection
 
-- **Swing** (>140 m²/s²): Bright blade + swing sound
-- **Hit** (>220 m²/s²): Flash white + clash sound
-- **Idle**: Gentle animation + hum loop
+Uses delta-based acceleration (change between readings) for responsive detection:
+
+- **Swing** (delta >15): Bright blade + swing sound
+- **Hit** (delta >40): Flash white + clash sound
+- **Idle**: Gentle breathing animation + hum loop
+
+Watch console output to tune: `delta: 5.2 (swing>15 hit>40)`
 
 ---
 
@@ -143,7 +152,7 @@ CIRCUITPY/
 
 ✅ **Motion & LED System**
 - 3-axis accelerometer motion detection
-- 30-pixel NeoPixel blade animations
+- 60-pixel RGBW NeoPixel blade animations
 - Power on/off animations
 - Color blending during effects
 - Adaptive brightness (idle vs. active)
@@ -183,22 +192,24 @@ Edit `code.py` to customize:
 
 ```python
 class UserConfig:
-    DISPLAY_BRIGHTNESS = 0.3        # Display brightness
-    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.3 # LED brightness
-    ENABLE_DIAGNOSTICS = True       # Serial debug output
+    # Themes - colors are RGBW format: (Red, Green, Blue, White)
+    THEMES = [
+        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
+        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
+        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0)},
+        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
+    ]
+
+    # Motion sensitivity (delta-based, lower = more sensitive)
+    SWING_THRESHOLD = 15            # Swing detection
+    HIT_THRESHOLD = 40              # Hit/clash detection
+
+    # Brightness presets (long-press RIGHT to cycle)
+    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]
+    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25
 
 class SaberConfig:
-    NUM_PIXELS = 30                 # NeoPixel count
-    SWING_THRESHOLD = 140           # Swing sensitivity
-    HIT_THRESHOLD = 220             # Hit sensitivity
-
-    # Themes (add/modify as needed)
-    THEMES = [
-        {"name": "jedi",       "color": (0, 0, 255),   "hit_color": (255, 255, 255)},
-        {"name": "powerpuff",  "color": (255, 0, 255), "hit_color": (0, 200, 255)},
-        {"name": "ricknmorty", "color": (0, 255, 0),   "hit_color": (255, 0, 0)},
-        {"name": "spongebob",  "color": (255, 255, 0), "hit_color": (255, 255, 255)},
-    ]
+    NUM_PIXELS = 60                 # Match your NeoPixel strip
 ```
 
 ---
@@ -214,7 +225,7 @@ class SaberConfig:
 
 ### No Motion Detection
 - Check serial console for "Accelerometer OK"
-- Lower thresholds (try SWING_THRESHOLD = 80)
+- Lower thresholds (try SWING_THRESHOLD = 10)
 - Verify MSA311 library installed
 
 ### No Audio
@@ -224,10 +235,10 @@ class SaberConfig:
 - Check serial console for errors
 
 ### LEDs Not Working
-- Verify `NUM_PIXELS = 30` matches your strip
+- Verify `NUM_PIXELS = 60` matches your strip
 - Check NeoPixel connector is plugged in
-- Try changing `pixel_order` in code (GRB vs RGB)
-- Ensure adequate power (5V, ~500mA for 30 pixels)
+- Try changing `pixel_order` in code (GRBW for RGBW strips)
+- Ensure adequate power (5V, ~1A for 60 RGBW pixels)
 
 ### Battery Percentage Wrong
 - Check `BATTERY_MIN_VOLTAGE` and `BATTERY_MAX_VOLTAGE` in code
@@ -240,7 +251,7 @@ class SaberConfig:
 
 ```
 SwingSaber/
-├── code.py                        # Main code (1355 lines)
+├── code.py                        # Main code (~1650 lines)
 ├── LICENSE                        # MIT License
 ├── README.md                      # This file
 ├── DEPLOYMENT.md                  # Deployment checklist
@@ -264,6 +275,15 @@ SwingSaber/
 ---
 
 ## Version History
+
+### v1.1 (2025-01-17)
+- Upgraded to 60-pixel RGBW NeoPixel strips
+- Added brightness presets (long-press RIGHT)
+- Added volume presets (long-press LEFT)
+- Added volume fine-tune (long-press A3/A4)
+- Delta-based motion detection (more responsive)
+- Onboard NeoPixel animations (breathing, chase, flash)
+- Persistent settings (theme, volume, brightness saved to NVM)
 
 ### v1.0 (2025-01-02)
 - Initial stable release
