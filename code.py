@@ -182,7 +182,7 @@ class SaberConfig:
     SPEAKER_ENABLE_PIN = board.SPEAKER_ENABLE
     VOLTAGE_MONITOR_PIN = board.VOLTAGE_MONITOR
 
-    # NeoPixel LED strip (RGBW strip)
+    # NeoPixel LED strip (Adafruit 4914: RGBW strip, 60 LEDs per meter)
     NUM_PIXELS = 55
     IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25% of full brightness
 
@@ -1047,6 +1047,9 @@ class SaberController:
         if not self.hw.strip:
             return
 
+        # Use active brightness for animations (idle uses dimmer 5%)
+        self.hw.strip.brightness = self.current_brightness
+
         self.audio.stop_audio()
         self.audio.play_audio_clip(self.theme_index, name, loop=False)
         start_time = time.monotonic()
@@ -1065,8 +1068,9 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i <= threshold else 0
                 else:
+                    lit_end = SaberConfig.NUM_PIXELS - threshold
                     for i in range(SaberConfig.NUM_PIXELS):
-                        self.hw.strip[i] = self.color_idle if i >= threshold else 0
+                        self.hw.strip[i] = self.color_idle if i < lit_end else 0
                 self.hw.strip.show()
 
                 # Update onboard pixels with spinner effect (matches STATE_TRANSITION in main loop)
