@@ -1059,8 +1059,9 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i <= threshold else 0
                 else:
+                    lit_end = SaberConfig.NUM_PIXELS - threshold
                     for i in range(SaberConfig.NUM_PIXELS):
-                        self.hw.strip[i] = self.color_idle if i >= threshold else 0
+                        self.hw.strip[i] = self.color_idle if i < lit_end else 0
                 self.hw.strip.show()
                 # Brief pause after LED update to let audio DMA catch up
                 time.sleep(0.02)
