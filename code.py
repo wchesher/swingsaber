@@ -1068,6 +1068,20 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i >= threshold else 0
                 self.hw.strip.show()
+
+                # Update onboard pixels with spinner effect (matches STATE_TRANSITION in main loop)
+                # This prevents timing issues from having inconsistent LED update patterns
+                if self.hw.onboard:
+                    now = time.monotonic()
+                    n = SaberConfig.ONBOARD_PIXELS
+                    pos = int(now * 8) % n
+                    for i in range(n):
+                        if i == pos:
+                            self.hw.onboard[i] = self.color_swing[:3]
+                        else:
+                            self.hw.onboard[i] = (0, 0, 0)
+                    self.hw.onboard.show()
+
                 # Use same rate limiting as swing/hit animations to prevent audio buffer underruns
                 time.sleep(UserConfig.LED_UPDATE_INTERVAL)
             except Exception as e:
