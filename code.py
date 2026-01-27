@@ -1063,8 +1063,8 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i < lit_end else 0
                 self.hw.strip.show()
-                # Brief pause after LED update to let audio DMA catch up
-                time.sleep(0.02)
+                # Use same rate limiting as swing/hit animations to prevent audio buffer underruns
+                time.sleep(UserConfig.LED_UPDATE_INTERVAL)
             except Exception as e:
                 print("Strip animation error:", e)
                 break
