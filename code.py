@@ -184,8 +184,8 @@ class SaberConfig:
     SPEAKER_ENABLE_PIN = board.SPEAKER_ENABLE
     VOLTAGE_MONITOR_PIN = board.VOLTAGE_MONITOR
 
-    # NeoPixel LED strip (Adafruit 4914: RGBW strip, 60 LEDs per meter)
-    NUM_PIXELS = 60
+    # NeoPixel LED strip (RGBW strip)
+    NUM_PIXELS = 55
     IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25% of full brightness
 
     # Onboard NeoPixels (HalloWing M4 has 4 RGB pixels around the eye)
