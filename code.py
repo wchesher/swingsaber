@@ -140,8 +140,6 @@ class UserConfig:
     # Audio processing
     STOP_AUDIO_WHEN_IDLE = True
     FADE_TRANSITION_DURATION = 0.1  # Audio fade time (100ms)
-    AUDIO_SAMPLE_RATE = 16000
-    AUDIO_BITS_PER_SAMPLE = 8
 
     # Battery monitoring
     BATTERY_CHECK_INTERVAL = 30.0    # Check every 30 seconds
@@ -394,7 +392,6 @@ class SaberHardware:
         self.touch_batt_a4 = None
         self._init_touch()
         self.accel = self._init_accel()
-        self.accel_error_count = 0
 
         print("Hardware init complete.")
         print("Status:", self.hardware_status)
@@ -569,6 +566,7 @@ class AudioManager:
         return self.set_volume(UserConfig.VOLUME_PRESETS[self.volume_preset_index])
 
     def _load_and_process_wav(self, filename):
+        wave_file = None
         try:
             wave_file = open(filename, "rb")
             wav = audiocore.WaveFile(wave_file)
@@ -576,9 +574,13 @@ class AudioManager:
         except OSError:
             # Audio file not found - this is OK, device works without sounds
             print("  (no audio: {})".format(filename))
+            if wave_file:
+                wave_file.close()
             return (None, None)
         except Exception as e:
             print("  Audio error:", e)
+            if wave_file:
+                wave_file.close()
             return (None, None)
 
     def play_audio_clip(self, theme_index, name, loop=False):
@@ -917,9 +919,13 @@ class SaberController:
         self.last_led_update = 0  # LED frame rate limiter
 
         # Touch button state tracking (for debouncing and long-press detection)
-        # Each button tracks: when last triggered, when press started, if it's a long press
+        # Tap = detected on RELEASE after short press; Long press = detected while held
         def new_touch_state():
-            return {'last_time': 0, 'press_start': 0, 'is_long_press': False}
+            return {
+                'press_start': 0,        # When current press started (0 = not pressed)
+                'is_long_press': False,  # Has this press exceeded long press threshold?
+                'long_press_fired': False # Have we already handled the long press?
+            }
         self.touch_state = {
             'left': new_touch_state(), 'right': new_touch_state(),
             'a3': new_touch_state(), 'a4': new_touch_state()
@@ -1066,8 +1072,22 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i < lit_end else 0
                 self.hw.strip.show()
-                # Brief pause after LED update to let audio DMA catch up
-                time.sleep(0.02)
+
+                # Update onboard pixels with spinner effect (matches STATE_TRANSITION in main loop)
+                # This prevents timing issues from having inconsistent LED update patterns
+                if self.hw.onboard:
+                    now = time.monotonic()
+                    n = SaberConfig.ONBOARD_PIXELS
+                    pos = int(now * 8) % n
+                    for i in range(n):
+                        if i == pos:
+                            self.hw.onboard[i] = self.color_swing[:3]
+                        else:
+                            self.hw.onboard[i] = (0, 0, 0)
+                    self.hw.onboard.show()
+
+                # Use same rate limiting as swing/hit animations to prevent audio buffer underruns
+                time.sleep(UserConfig.LED_UPDATE_INTERVAL)
             except Exception as e:
                 print("Strip animation error:", e)
                 break
@@ -1095,7 +1115,11 @@ class SaberController:
         return None
 
     def _check_touch_debounced(self, touch_input, touch_key=None):
-        """Check touch with debouncing and long-press detection."""
+        """Check for TAP: returns True on RELEASE after a short press.
+
+        This allows long press to be detected first (while held). Tap only
+        fires when the button is released before the long press threshold.
+        """
         if not touch_input:
             return False
 
@@ -1107,37 +1131,69 @@ class SaberController:
         state = self.touch_state[touch_key]
 
         try:
-            if touch_input.value:
+            currently_pressed = touch_input.value
+
+            if currently_pressed:
+                # Button is pressed - update timing state
                 now = time.monotonic()
                 if state['press_start'] == 0:
+                    # New press starting
                     state['press_start'] = now
-
-                press_duration = now - state['press_start']
-                if press_duration >= UserConfig.LONG_PRESS_TIME and not state['is_long_press']:
+                    state['is_long_press'] = False
+                    state['long_press_fired'] = False
+                elif now - state['press_start'] >= UserConfig.LONG_PRESS_TIME:
+                    # Long press threshold reached (will be handled by _check_long_press)
                     state['is_long_press'] = True
-                    return False
-
-                if now - state['last_time'] >= UserConfig.TOUCH_DEBOUNCE_TIME:
-                    state['last_time'] = now
-                    return True
+                # Don't return True while pressed - wait for release
             else:
+                # Button is released - check if it was a short press (tap)
+                if state['press_start'] > 0 and not state['is_long_press']:
+                    # Short press released = TAP
+                    state['press_start'] = 0
+                    return True
+                # Reset state after any release
                 state['press_start'] = 0
                 state['is_long_press'] = False
+                state['long_press_fired'] = False
         except Exception as e:
             print("Touch read error:", e)
 
         return False
 
     def _check_long_press(self, touch_input, touch_key=None):
+        """Check for LONG PRESS: returns True once when threshold reached while held.
+
+        Must be called before _check_touch_debounced in the same loop iteration
+        to ensure long press is detected before tap on release.
+        """
         if not touch_input:
             return False
         if touch_key is None:
             touch_key = self._get_touch_key(touch_input)
         if touch_key is None or touch_key not in self.touch_state:
             return False
+
+        state = self.touch_state[touch_key]
+
         try:
-            if touch_input.value and self.touch_state[touch_key]['is_long_press']:
-                return True
+            if not touch_input.value:
+                return False  # Not pressed
+
+            now = time.monotonic()
+
+            # Start tracking if this is a new press
+            if state['press_start'] == 0:
+                state['press_start'] = now
+                state['is_long_press'] = False
+                state['long_press_fired'] = False
+                return False
+
+            # Check if long press threshold reached
+            if now - state['press_start'] >= UserConfig.LONG_PRESS_TIME:
+                state['is_long_press'] = True
+                if not state['long_press_fired']:
+                    state['long_press_fired'] = True
+                    return True  # Fire long press once
         except Exception:
             pass
         return False
@@ -1157,6 +1213,7 @@ class SaberController:
         if touch_key and touch_key in self.touch_state:
             self.touch_state[touch_key]['press_start'] = 0
             self.touch_state[touch_key]['is_long_press'] = False
+            self.touch_state[touch_key]['long_press_fired'] = False
 
     def _handle_battery_touch(self):
         """A3/A4: Long press = volume, tap = battery status."""
