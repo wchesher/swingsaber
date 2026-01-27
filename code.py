@@ -1065,9 +1065,8 @@ class SaberController:
                     for i in range(SaberConfig.NUM_PIXELS):
                         self.hw.strip[i] = self.color_idle if i <= threshold else 0
                 else:
-                    lit_end = SaberConfig.NUM_PIXELS - threshold
                     for i in range(SaberConfig.NUM_PIXELS):
-                        self.hw.strip[i] = self.color_idle if i < lit_end else 0
+                        self.hw.strip[i] = self.color_idle if i >= threshold else 0
                 self.hw.strip.show()
                 # Use same rate limiting as swing/hit animations to prevent audio buffer underruns
                 time.sleep(UserConfig.LED_UPDATE_INTERVAL)
