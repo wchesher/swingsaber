@@ -1102,6 +1102,11 @@ class SaberController:
             self._feed_watchdog()
             time.sleep(SaberConfig.AUDIO_STOP_CHECK_INTERVAL)
 
+        # Clean up audio file and let DMA settle before next audio plays
+        # This prevents choppy idle sound after power-on animation
+        self.audio._close_current_file()
+        time.sleep(0.01)
+
     def _get_touch_key(self, touch_input):
         """Map touch input to state key."""
         if touch_input == self.hw.touch_left:
