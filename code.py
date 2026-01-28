@@ -588,12 +588,13 @@ class AudioManager:
         if not self.audio:
             return False
 
-        # Stop current playback and let DMA settle
-        if self.audio.playing:
-            self.audio.stop()
-            time.sleep(0.01)
+        # Always stop audio and close file before loading new clip
+        # This ensures clean DMA state even if previous clip finished naturally
+        self.audio.stop()
         self._close_current_file()
 
+        # Wait for DMA to fully settle, then free old buffer memory
+        time.sleep(0.03)  # 30ms settle time
         gc.collect()
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
@@ -1101,11 +1102,6 @@ class SaberController:
         while self.audio.audio and self.audio.audio.playing:
             self._feed_watchdog()
             time.sleep(SaberConfig.AUDIO_STOP_CHECK_INTERVAL)
-
-        # Clean up audio file and let DMA settle before next audio plays
-        # This prevents choppy idle sound after power-on animation
-        self.audio._close_current_file()
-        time.sleep(0.01)
 
     def _get_touch_key(self, touch_input):
         """Map touch input to state key."""
