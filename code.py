@@ -588,13 +588,9 @@ class AudioManager:
         if not self.audio:
             return False
 
-        # Always stop audio and close file before loading new clip
-        # This ensures clean DMA state even if previous clip finished naturally
+        # Stop any current playback and close file
         self.audio.stop()
         self._close_current_file()
-
-        # Wait for DMA to fully settle, then free old buffer memory
-        time.sleep(0.03)  # 30ms settle time
         gc.collect()
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
@@ -648,6 +644,21 @@ class AudioManager:
         """Restore audio after mute."""
         if self.speaker_enable:
             self.speaker_enable.value = True
+
+    def reinit(self):
+        """Reinitialize AudioOut for clean state (fixes playback issues)."""
+        self.stop_audio()
+        self._close_current_file()
+        if self.audio:
+            try:
+                self.audio.deinit()
+            except Exception:
+                pass
+        try:
+            self.audio = audioio.AudioOut(board.SPEAKER)
+        except Exception as e:
+            print("Audio reinit error:", e)
+            self.audio = None
 
     def cleanup(self):
         self.stop_audio()
@@ -1297,6 +1308,7 @@ class SaberController:
 
         if self.mode == SaberConfig.STATE_OFF:
             print("POWER ON - theme {}".format(self.theme_index))
+            self.audio.reinit()  # Fresh AudioOut prevents playback issues
             self._transition_to_state(SaberConfig.STATE_TRANSITION)
             self._animate_power("on", duration=SaberConfig.POWER_ON_DURATION, reverse=False)
             self.audio.play_audio_clip(self.theme_index, "idle", loop=True)
