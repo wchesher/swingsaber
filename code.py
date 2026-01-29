@@ -600,9 +600,8 @@ class AudioEngine:
 class Display:
     """TFT display with LRU image cache and non-blocking timeout."""
 
-    def __init__(self, battery_func, audio):
+    def __init__(self, battery_func):
         self._group = displayio.Group()
-        self._audio = audio
         self._get_battery = battery_func
         self._cache = {}
         self._cache_order = []
@@ -1101,7 +1100,7 @@ class SaberController:
         print("\n=== SwingSaber v2.0 ===")
         self.hw = Hardware()
         self.audio = AudioEngine(self.hw.speaker_enable)
-        self.display = Display(self.hw.read_battery_pct, self.audio)
+        self.display = Display(self.hw.read_battery_pct)
         self.input = InputManager(self.hw)
         self.motion = MotionEngine(self.hw)
         self.led = LEDEngine(self.hw)
