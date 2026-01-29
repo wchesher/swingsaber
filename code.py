@@ -21,6 +21,7 @@ import busio
 import neopixel
 import audioio
 import audiocore
+import audiomixer
 import adafruit_msa3xx
 import touchio
 import analogio
@@ -95,11 +96,10 @@ class UserConfig:
     IDLE_BRIGHTNESS = 0.05
 
     # -- Volume ---------------------------------------------------------------
-    VOLUME_PRESETS = [30, 50, 70, 100]
-    DEFAULT_VOLUME = 70
-    VOLUME_STEP = 10
-    MIN_VOLUME = 10
-    MAX_VOLUME = 100
+    # Actual mixer levels (0-1).  "100%" user-facing = 0.85 hardware max
+    # to protect speakers and leave headroom.
+    VOLUME_PRESETS = [0.21, 0.43, 0.64, 0.85]
+    VOLUME_LABELS = [25, 50, 75, 100]  # User-facing percentages
 
     # -- Display --------------------------------------------------------------
     DISPLAY_BRIGHTNESS = 0.3
@@ -152,7 +152,8 @@ class HWConfig:
     ONBOARD_BRIGHTNESS = 0.3
     IDLE_COLOR_DIVISOR = 4
 
-    # Audio
+    # Audio — WAV files must be mono, 16-bit signed, at this sample rate
+    AUDIO_SAMPLE_RATE = 22050
     AUDIO_BUFFER_SIZE = 8192
 
     # Battery ADC
@@ -260,12 +261,12 @@ class PersistentSettings:
     @staticmethod
     def load_volume():
         if not PersistentSettings._valid():
-            return UserConfig.DEFAULT_VOLUME
+            return len(UserConfig.VOLUME_PRESETS) - 1
         try:
             v = microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET]
-            return v if UserConfig.MIN_VOLUME <= v <= UserConfig.MAX_VOLUME else UserConfig.DEFAULT_VOLUME
+            return v if v < len(UserConfig.VOLUME_PRESETS) else len(UserConfig.VOLUME_PRESETS) - 1
         except Exception:
-            return UserConfig.DEFAULT_VOLUME
+            return len(UserConfig.VOLUME_PRESETS) - 1
 
     @staticmethod
     def load_brightness():
@@ -475,23 +476,21 @@ class Hardware:
 #    valid data and not deinit the AudioOut while DMA is running.
 # 2. We NEVER block waiting for audio to finish inside the main loop.
 #    Completion is checked once per frame via `poll()`.
-# 3. Transition between clips: stop → close old file → open new file → play.
-#    This is the fastest possible transition (~2-5 ms on SAMD51).  There is
-#    no way to cross-fade with a single AudioOut and no mixer, so we make the
-#    gap as short as humanly possible.
-# 4. reinit() fully tears down and rebuilds AudioOut.  Used only on power-on
-#    to guarantee a clean DMA slate.
+# 3. Volume is controlled via audiomixer.Mixer — AudioOut plays the Mixer
+#    continuously, and we play/stop WAV files on voice[0].
+# 4. reinit() fully tears down and rebuilds AudioOut + Mixer.  Used only on
+#    power-on to guarantee a clean DMA slate.
 
 class AudioEngine:
-    """Minimal, reliable audio playback — one clip at a time."""
+    """Audio playback with real volume control via audiomixer."""
 
     def __init__(self, speaker_enable):
         self._speaker_enable = speaker_enable
         self._audio = None
+        self._mixer = None
         self._wave_file = None
         self._wav = None
-        self.volume = UserConfig.DEFAULT_VOLUME
-        self.volume_preset_index = 1
+        self.volume_index = len(UserConfig.VOLUME_PRESETS) - 1
 
         if self._speaker_enable:
             self._speaker_enable.value = True
@@ -502,12 +501,30 @@ class AudioEngine:
     # -- low-level ------------------------------------------------------------
 
     def _create_audio_out(self):
-        """Create a fresh AudioOut instance."""
+        """Create AudioOut + Mixer.  The mixer runs continuously; we
+        play/stop individual WAV files on voice[0]."""
         try:
             self._audio = audioio.AudioOut(board.SPEAKER)
+            self._mixer = audiomixer.Mixer(
+                voice_count=1,
+                sample_rate=HWConfig.AUDIO_SAMPLE_RATE,
+                channel_count=1,
+                bits_per_sample=16,
+                samples_signed=True,
+                buffer_size=HWConfig.AUDIO_BUFFER_SIZE,
+            )
+            self._audio.play(self._mixer)
+            self._apply_volume()
         except Exception as e:
             print("AudioOut err:", e)
             self._audio = None
+            self._mixer = None
+
+    def _apply_volume(self):
+        """Push current volume preset to the mixer."""
+        if self._mixer is not None:
+            level = UserConfig.VOLUME_PRESETS[self.volume_index]
+            self._mixer.voice[0].level = level
 
     def _close_file(self):
         """Close the current WAV file handle."""
@@ -520,10 +537,10 @@ class AudioEngine:
             self._wav = None
 
     def _hard_stop(self):
-        """Stop DMA immediately and release the file."""
-        if self._audio is not None:
+        """Stop the voice and release the file (mixer keeps running)."""
+        if self._mixer is not None:
             try:
-                self._audio.stop()
+                self._mixer.voice[0].stop()
             except Exception:
                 pass
         self._close_file()
@@ -531,32 +548,32 @@ class AudioEngine:
     # -- public API -----------------------------------------------------------
 
     def reinit(self):
-        """Full AudioOut teardown + rebuild — use sparingly (power-on only)."""
+        """Full AudioOut + Mixer teardown + rebuild (power-on only)."""
         self._hard_stop()
         if self._audio is not None:
             try:
+                self._audio.stop()
                 self._audio.deinit()
             except Exception:
                 pass
             self._audio = None
+            self._mixer = None
         gc.collect()
         self._create_audio_out()
 
     def play(self, theme_index, name, loop=False):
         """Play sounds/{theme_index}{name}.wav.  Returns True if playing."""
-        if self._audio is None:
+        if self._mixer is None:
             return False
 
-        # Fastest possible transition: stop DMA → close old file → gc → open new → play
         self._hard_stop()
-        gc.collect()  # free WAV buffer memory before allocating new one
+        gc.collect()
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
         try:
             self._wave_file = open(filename, "rb")
             self._wav = audiocore.WaveFile(self._wave_file)
         except OSError:
-            # Missing file is fine — device works without sounds
             self._close_file()
             return False
         except Exception as e:
@@ -565,7 +582,7 @@ class AudioEngine:
             return False
 
         try:
-            self._audio.play(self._wav, loop=loop)
+            self._mixer.voice[0].play(self._wav, loop=loop)
             return True
         except Exception as e:
             print("play err:", e)
@@ -574,10 +591,10 @@ class AudioEngine:
 
     @property
     def playing(self):
-        if self._audio is None:
+        if self._mixer is None:
             return False
         try:
-            return self._audio.playing
+            return self._mixer.voice[0].playing
         except Exception:
             return False
 
@@ -598,29 +615,37 @@ class AudioEngine:
         if self._speaker_enable:
             self._speaker_enable.value = True
 
-    def set_volume(self, pct):
-        self.volume = max(UserConfig.MIN_VOLUME, min(pct, UserConfig.MAX_VOLUME))
-        print("Volume: {}%".format(self.volume))
-        return self.volume
+    def set_volume_index(self, idx):
+        """Set volume by preset index.  Returns the index."""
+        idx = max(0, min(idx, len(UserConfig.VOLUME_PRESETS) - 1))
+        self.volume_index = idx
+        self._apply_volume()
+        print("Volume: {}%".format(UserConfig.VOLUME_LABELS[idx]))
+        return idx
 
-    def increase_volume(self):
-        return self.set_volume(self.volume + UserConfig.VOLUME_STEP)
+    def volume_up(self):
+        """Step to next higher preset.  Returns the new index."""
+        return self.set_volume_index(self.volume_index + 1)
 
-    def decrease_volume(self):
-        return self.set_volume(self.volume - UserConfig.VOLUME_STEP)
+    def volume_down(self):
+        """Step to next lower preset.  Returns the new index."""
+        return self.set_volume_index(self.volume_index - 1)
 
-    def cycle_volume_preset(self):
-        self.volume_preset_index = (self.volume_preset_index + 1) % len(UserConfig.VOLUME_PRESETS)
-        return self.set_volume(UserConfig.VOLUME_PRESETS[self.volume_preset_index])
+    def cycle_volume(self):
+        """Cycle through volume presets (wraps around).  Returns the new index."""
+        return self.set_volume_index(
+            (self.volume_index + 1) % len(UserConfig.VOLUME_PRESETS))
 
     def cleanup(self):
         self._hard_stop()
         if self._audio is not None:
             try:
+                self._audio.stop()
                 self._audio.deinit()
             except Exception:
                 pass
             self._audio = None
+            self._mixer = None
 
 
 # =============================================================================
@@ -1302,7 +1327,7 @@ class SaberController:
 
         # Theme / settings
         self.theme_index = PersistentSettings.load_theme()
-        self.audio.set_volume(PersistentSettings.load_volume())
+        self.audio.set_volume_index(PersistentSettings.load_volume())
         self.brightness_index = PersistentSettings.load_brightness()
         self.brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_index]
 
@@ -1328,7 +1353,8 @@ class SaberController:
 
         self.display._off()
         print("theme={} vol={}% bright={}%".format(
-            self.theme_index, self.audio.volume,
+            self.theme_index,
+            UserConfig.VOLUME_LABELS[self.audio.volume_index],
             UserConfig.BRIGHTNESS_LABELS[self.brightness_index]))
         print()
 
@@ -1449,14 +1475,14 @@ class SaberController:
 
         # -- A3/A4: battery tap, volume long-press ----------------------------
         if self.input.long_press("a3"):
-            vol = self.audio.increase_volume()
-            PersistentSettings.save_volume(vol)
-            self.display.show_volume(vol)
+            idx = self.audio.volume_up()
+            PersistentSettings.save_volume(idx)
+            self.display.show_volume(UserConfig.VOLUME_LABELS[idx])
             return True
         if self.input.long_press("a4"):
-            vol = self.audio.decrease_volume()
-            PersistentSettings.save_volume(vol)
-            self.display.show_volume(vol)
+            idx = self.audio.volume_down()
+            PersistentSettings.save_volume(idx)
+            self.display.show_volume(UserConfig.VOLUME_LABELS[idx])
             return True
         if self.input.tap("a3") or self.input.tap("a4"):
             self.display.show_battery()
@@ -1464,9 +1490,9 @@ class SaberController:
 
         # -- LEFT: theme tap, volume-preset long-press ------------------------
         if self.input.long_press("left"):
-            vol = self.audio.cycle_volume_preset()
-            PersistentSettings.save_volume(vol)
-            self.display.show_volume(vol)
+            idx = self.audio.cycle_volume()
+            PersistentSettings.save_volume(idx)
+            self.display.show_volume(UserConfig.VOLUME_LABELS[idx])
             return True
 
         if self.input.tap("left"):
