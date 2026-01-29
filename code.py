@@ -39,6 +39,27 @@ except ImportError:
 
 
 # =============================================================================
+# ANIMATION STYLES (for onboard NeoPixels)
+# =============================================================================
+
+ANIM_BREATHE = 0
+ANIM_SPIN = 1
+ANIM_LIGHTNING = 2
+ANIM_PULSE = 3
+ANIM_FIRE = 4
+ANIM_SPARKLE = 5
+
+_ANIM_NAMES = {
+    ANIM_BREATHE: "breathe",
+    ANIM_SPIN: "spin",
+    ANIM_LIGHTNING: "lightning",
+    ANIM_PULSE: "pulse",
+    ANIM_FIRE: "fire",
+    ANIM_SPARKLE: "sparkle",
+}
+
+
+# =============================================================================
 # USER SETTINGS
 # =============================================================================
 
@@ -49,24 +70,28 @@ class UserConfig:
     # Each theme needs: {index}on.wav, {index}off.wav, {index}idle.wav,
     #                    {index}swing.wav, {index}hit.wav, {index}switch.wav
     THEMES = [
-        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
-        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
-        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0)},
-        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
+        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255),
+         "idle_anim": ANIM_BREATHE, "swing_anim": ANIM_SPIN, "hit_anim": ANIM_LIGHTNING},
+        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0),
+         "idle_anim": ANIM_PULSE, "swing_anim": ANIM_SPARKLE, "hit_anim": ANIM_FIRE},
+        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0),
+         "idle_anim": ANIM_FIRE, "swing_anim": ANIM_LIGHTNING, "hit_anim": ANIM_SPARKLE},
+        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255),
+         "idle_anim": ANIM_SPARKLE, "swing_anim": ANIM_PULSE, "hit_anim": ANIM_SPIN},
     ]
 
     # -- Motion ---------------------------------------------------------------
-    # Swing energy accumulates during sustained motion; a brief bump won't
-    # reach this but a real arc will.  Hit is an instantaneous spike on the
-    # EMA-filtered delta — sharp impacts punch through the filter.
-    # Tune with diagnostics: watch "nrg:" for swing, "Δ:" for hit.
-    SWING_THRESHOLD = 10     # accumulated swing energy (sustained motion)
-    HIT_THRESHOLD = 20       # instantaneous filtered delta² (sharp impact)
-    MOTION_COOLDOWN = 0.15   # seconds between events (prevents re-trigger)
+    # Force thresholds in m/s² of absolute acceleration above resting gravity.
+    # Direction-independent: the same physical force triggers regardless of
+    # which way the saber is moved.
+    SWING_THRESHOLD = 4.0     # Sustained force to trigger swing (~0.4G)
+    HIT_THRESHOLD = 15.0      # Impact spike to trigger hit (~1.5G)
+    SMOOTHING_FACTOR = 0.4    # EMA alpha (0-1): higher = more responsive
 
     # -- Brightness -----------------------------------------------------------
-    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]
-    DEFAULT_BRIGHTNESS = 0.25
+    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35, 0.45]
+    BRIGHTNESS_LABELS = [25, 50, 75, 100]  # User-facing percentages
+    DEFAULT_BRIGHTNESS = 0.45
     IDLE_BRIGHTNESS = 0.05
 
     # -- Volume ---------------------------------------------------------------
@@ -245,12 +270,12 @@ class PersistentSettings:
     @staticmethod
     def load_brightness():
         if not PersistentSettings._valid():
-            return 1
+            return 3
         try:
             v = microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET]
-            return v if v < len(UserConfig.BRIGHTNESS_PRESETS) else 1
+            return v if v < len(UserConfig.BRIGHTNESS_PRESETS) else 3
         except Exception:
-            return 1
+            return 3
 
     @staticmethod
     def save_theme(idx):
@@ -821,133 +846,85 @@ class InputManager:
 # MOTION ENGINE
 # =============================================================================
 #
-# Two-stage pipeline:
-#   1. poll()     — samples the accelerometer, runs an EMA low-pass filter,
-#                   computes delta (change in filtered accel), and feeds two
-#                   detection signals: instantaneous delta² and swing energy.
-#   2. classify() — compares detection signals against thresholds and applies
-#                   a cooldown timer.  Returns 'hit', 'swing', or None.
-#
-# The controller calls poll() every frame (keeps the filter warm across all
-# states) and classify() only when in IDLE.  This means the filter is always
-# up-to-date and detection is instant when returning from swing/hit.
-#
-# Detection signals:
-#   delta_sq     — instantaneous squared magnitude of the delta between
-#                  consecutive EMA-filtered readings.  Sharp impacts punch
-#                  through the filter and produce large single-sample spikes.
-#   swing_energy — exponential moving sum of delta_sq.  Sustained moderate
-#                  motion (an arc swing) accumulates energy over several
-#                  samples; a brief noise spike decays before reaching the
-#                  threshold.  This naturally separates swings from bumps.
-#
-# EMA filter:  filtered = α·raw + (1-α)·prev_filtered
-#   α = 0.4 gives moderate smoothing (~2-3 sample settling time at 15 ms
-#   interval).  This cuts high-frequency noise while keeping latency under
-#   50 ms — fast enough that swing detection still feels instant.
+# Direction-independent force detection using acceleration magnitude.
+# Computes absolute force as the deviation from resting gravity (9.81 m/s²),
+# so the same physical motion triggers regardless of saber orientation.
+# Uses an exponential moving average (EMA) for swing detection (sustained
+# motion) and raw magnitude for hit detection (impact spikes).
 
 class MotionEngine:
-    """Filtered accelerometer with energy-based swing and spike-based hit detection."""
+    """Direction-independent force detection via acceleration magnitude.
 
-    _EMA_ALPHA = 0.4       # filter smoothing (0 = heavy, 1 = none)
-    _SWING_DECAY = 0.65    # per-sample energy decay (lower = faster decay)
+    Instead of tracking per-axis deltas, we compute the magnitude of the
+    full acceleration vector and subtract gravity.  This yields a single
+    force value in m/s² that is identical regardless of orientation.
+
+    Two signals are produced each sample:
+      - smoothed: EMA-filtered force for swing detection (sustained motion)
+      - raw:      instantaneous force for hit detection (impact spikes)
+    """
+
+    _GRAVITY = 9.81  # m/s² — magnitude at rest
 
     def __init__(self, hw):
         self._hw = hw
-        self._enabled = hw.accel is not None
         self._error_count = 0
+        self._enabled = hw.accel is not None
+        self._disabled_time = 0
         self._last_recovery = 0
         self._last_sample = 0
         self._last_diag = 0
-        self._last_event = 0
+        self._smoothed = 0.0
 
-        # Filter state (None = uninitialized, first sample seeds)
-        self._ema = None
-        self._prev = None
-
-        # Detection signals — public for diagnostics
-        self.delta_sq = 0.0       # instantaneous filtered delta²
-        self.swing_energy = 0.0   # accumulated swing energy
-
-    # -- sampling & filtering -------------------------------------------------
+        # Public diagnostics
+        self.last_raw = 0.0
+        self.last_smoothed = 0.0
 
     def poll(self, now):
-        """Sample accelerometer and update detection signals.  Returns True
-        if a new sample was taken, False if skipped or unavailable."""
-        if not self._enabled or self._hw.accel is None:
-            return False
-        if now - self._last_sample < ACCEL_SAMPLE_INTERVAL:
-            return False
-        self._last_sample = now
+        """Sample accelerometer if interval elapsed.
 
+        Returns (smoothed_force, raw_force) or None.
+          - smoothed_force: EMA-filtered, use for swing detection
+          - raw_force: instantaneous, use for hit/impact detection
+        """
+        if not self._enabled:
+            return None
+        if now - self._last_sample < ACCEL_SAMPLE_INTERVAL:
+            return None
+        self._last_sample = now
+        if self._hw.accel is None:
+            return None
         try:
             ax, ay, az = self._hw.accel.acceleration
+
+            # Magnitude of the full acceleration vector (direction-independent)
+            mag = math.sqrt(ax * ax + ay * ay + az * az)
+
+            # Absolute force above rest — gravity cancels out regardless of
+            # which way the sensor is oriented
+            raw = abs(mag - self._GRAVITY)
+
+            # Exponential moving average for swing detection
+            a = UserConfig.SMOOTHING_FACTOR
+            self._smoothed = self._smoothed * (1.0 - a) + raw * a
+
+            self.last_raw = raw
+            self.last_smoothed = self._smoothed
+            self._error_count = 0
+            return (self._smoothed, raw)
         except Exception as e:
             self._error_count += 1
             if self._error_count >= UserConfig.MAX_ACCEL_ERRORS:
                 print("accel disabled ({} errs)".format(self._error_count))
                 self._enabled = False
+                self._disabled_time = now
             elif self._error_count % 5 == 0:
                 print("accel err {}: {}".format(self._error_count, e))
             time.sleep(0.01)
-            return False
-        self._error_count = 0
-
-        # Seed the filter on the very first valid reading
-        if self._ema is None:
-            self._ema = (ax, ay, az)
-            self._prev = (ax, ay, az)
-            return True
-
-        # EMA low-pass filter
-        a = self._EMA_ALPHA
-        b = 1.0 - a
-        ex = a * ax + b * self._ema[0]
-        ey = a * ay + b * self._ema[1]
-        ez = a * az + b * self._ema[2]
-        self._ema = (ex, ey, ez)
-
-        # Delta on filtered signal (gravity cancels, noise reduced)
-        dx = ex - self._prev[0]
-        dy = ey - self._prev[1]
-        dz = ez - self._prev[2]
-        self._prev = (ex, ey, ez)
-        dsq = dx * dx + dy * dy + dz * dz
-        self.delta_sq = dsq
-
-        # Swing energy: builds during sustained motion, decays at rest
-        self.swing_energy = self.swing_energy * self._SWING_DECAY + dsq
-
-        return True
-
-    # -- classification -------------------------------------------------------
-
-    def classify(self, now):
-        """Classify current motion.  Returns 'hit', 'swing', or None.
-        Call only when the saber is in IDLE — poll() should run every frame."""
-        if self._ema is None:
             return None
-        if now - self._last_event < UserConfig.MOTION_COOLDOWN:
-            return None
-
-        # Hit: sharp spike in instantaneous delta (impacts punch through EMA)
-        if self.delta_sq > UserConfig.HIT_THRESHOLD:
-            self._last_event = now
-            self.swing_energy = 0.0
-            return "hit"
-
-        # Swing: sustained motion has built up energy over several samples
-        if self.swing_energy > UserConfig.SWING_THRESHOLD:
-            self._last_event = now
-            self.swing_energy = 0.0
-            return "swing"
-
-        return None
-
-    # -- recovery & diagnostics -----------------------------------------------
 
     def try_recover(self, now):
-        """Attempt accelerometer recovery if disabled."""
+        """Attempt recovery if disabled.  Call from maintenance path."""
         if self._enabled:
             return
         if now - self._last_recovery < UserConfig.ACCEL_RECOVERY_INTERVAL:
@@ -957,9 +934,7 @@ class MotionEngine:
         if self._hw.reinit_accel():
             self._enabled = True
             self._error_count = 0
-            self._ema = None
-            self._prev = None
-            self.swing_energy = 0.0
+            self._smoothed = 0.0
             print("accel recovered")
 
     def print_diag(self, now):
@@ -968,8 +943,8 @@ class MotionEngine:
         if now - self._last_diag < UserConfig.ACCEL_OUTPUT_INTERVAL:
             return
         self._last_diag = now
-        print("nrg:{:.1f} d:{:.1f} (swing>{} hit>{})".format(
-            self.swing_energy, self.delta_sq,
+        print("force: raw={:.1f} smooth={:.1f} m/s² (swing>{:.1f} hit>{:.1f})".format(
+            self.last_raw, self.last_smoothed,
             UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
 
 
@@ -1145,6 +1120,139 @@ class LEDEngine:
         except Exception:
             pass
 
+    def onboard_lightning(self, color, now):
+        """Random electrical crackle — overlapping sine waves create
+        chaotic flicker that simulates arcs jumping between pixels."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            for i in range(n):
+                # Two sine products at irrational-ish frequencies per pixel
+                v = (math.sin(now * 17.3 + i * 2.5)
+                     * math.sin(now * 23.1 + i * 4.1))
+                v += math.sin(now * 31.7 + i * 1.3) * 0.5
+                if v > 0.6:
+                    # Bright arc
+                    self._hw.onboard[i] = (
+                        min(255, int(color[0] + 80)),
+                        min(255, int(color[1] + 80)),
+                        min(255, int(color[2] + 80)),
+                    )
+                elif v > 0.1:
+                    self._hw.onboard[i] = (
+                        int(color[0] * 0.3),
+                        int(color[1] * 0.3),
+                        int(color[2] * 0.3),
+                    )
+                else:
+                    self._hw.onboard[i] = (
+                        int(color[0] * 0.05),
+                        int(color[1] * 0.05),
+                        int(color[2] * 0.05),
+                    )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_pulse(self, color, now):
+        """Heartbeat double-pulse: lub-dub … lub-dub.
+        Two quick beats followed by a longer rest period."""
+        if not self._hw.onboard:
+            return
+        try:
+            cycle = now % 1.2
+            if cycle < 0.08:
+                pulse = cycle / 0.08
+            elif cycle < 0.16:
+                pulse = 1.0 - (cycle - 0.08) / 0.08
+            elif cycle < 0.28:
+                pulse = 0.1
+            elif cycle < 0.36:
+                pulse = (cycle - 0.28) / 0.08 * 0.7
+            elif cycle < 0.44:
+                pulse = 0.7 - (cycle - 0.36) / 0.08 * 0.6
+            else:
+                pulse = 0.1
+            r = int(color[0] * pulse)
+            g = int(color[1] * pulse)
+            b = int(color[2] * pulse)
+            self._hw.onboard.fill((r, g, b))
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_fire(self, color, now):
+        """Flickering flame — each pixel independently flutters at
+        different rates, producing an organic fire-like shimmer."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            for i in range(n):
+                flicker = (
+                    0.3
+                    + 0.4 * abs(math.sin(now * (4.7 + i * 3.1) + i * 0.9))
+                    + 0.3 * abs(math.sin(now * (7.3 + i * 1.7) + i * 2.3))
+                )
+                if flicker > 1.0:
+                    flicker = 1.0
+                self._hw.onboard[i] = (
+                    int(color[0] * flicker),
+                    int(color[1] * flicker),
+                    int(color[2] * flicker),
+                )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_sparkle(self, color, now):
+        """Random sparkle/twinkle — pixels briefly flash bright then
+        fade quickly, creating a glittering effect."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            for i in range(n):
+                phase = (now * (3.7 + i * 2.3) + i * 1.1) % 1.0
+                if phase < 0.12:
+                    bright = 0.3 + 0.7 * math.sin(phase / 0.12 * math.pi)
+                else:
+                    bright = 0.08
+                self._hw.onboard[i] = (
+                    int(color[0] * bright),
+                    int(color[1] * bright),
+                    int(color[2] * bright),
+                )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_white_flash(self):
+        """Instant white flash on all onboard pixels (used for hit impact)."""
+        if not self._hw.onboard:
+            return
+        try:
+            self._hw.onboard.fill((255, 255, 255))
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_animate(self, style, color, now):
+        """Dispatch to the named onboard animation style."""
+        if style == ANIM_BREATHE:
+            self.onboard_breathe(color, now)
+        elif style == ANIM_SPIN:
+            self.onboard_spin(color, now)
+        elif style == ANIM_LIGHTNING:
+            self.onboard_lightning(color, now)
+        elif style == ANIM_PULSE:
+            self.onboard_pulse(color, now)
+        elif style == ANIM_FIRE:
+            self.onboard_fire(color, now)
+        elif style == ANIM_SPARKLE:
+            self.onboard_sparkle(color, now)
+
     def onboard_spinner(self, color, now):
         """Fast spinner for power transitions."""
         if not self._hw.onboard:
@@ -1168,16 +1276,15 @@ class SaberController:
     Top-level coordinator.
 
     Main loop cadence (per frame, ~20 ms target):
-      1. Feed watchdog                       (< 0.01 ms)
-      2. Poll audio engine                   (< 0.01 ms)
-      3. Poll inputs                         (< 0.5 ms)
-      4. Handle input actions                (varies)
-      5. Sample accelerometer + EMA filter   (< 1 ms, every frame)
-      6. Classify motion + state logic       (< 0.5 ms)
-      7. Update LEDs (strip + onboard)       (< 4 ms)
-      8. Poll display timeout                (< 0.01 ms)
-      9. Periodic maintenance (GC/batt)      (< 1 ms, occasionally 10 ms)
-     10. Sleep remainder of frame            (adaptive)
+      1. Feed watchdog                   (< 0.01 ms)
+      2. Poll audio engine               (< 0.01 ms)
+      3. Poll inputs                     (< 0.5 ms)
+      4. Handle input actions            (varies)
+      5. Process state logic             (< 0.5 ms)
+      6. Update LEDs (strip + onboard)   (< 4 ms)
+      7. Poll display timeout            (< 0.01 ms)
+      8. Periodic maintenance (GC/batt)  (< 1 ms, occasionally 10 ms for batt)
+      9. Sleep remainder of frame        (adaptive)
     """
 
     def __init__(self):
@@ -1199,10 +1306,13 @@ class SaberController:
         self.brightness_index = PersistentSettings.load_brightness()
         self.brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_index]
 
-        # Derived colors
+        # Derived colors + animation styles
         self.color_full = (0, 0, 0, 0)
         self.color_idle = (0, 0, 0, 0)
         self.color_hit = (0, 0, 0, 0)
+        self.idle_anim = ANIM_BREATHE
+        self.swing_anim = ANIM_SPIN
+        self.hit_anim = ANIM_LIGHTNING
         self._apply_theme()
 
         # Timing
@@ -1218,7 +1328,8 @@ class SaberController:
 
         self.display._off()
         print("theme={} vol={}% bright={}%".format(
-            self.theme_index, self.audio.volume, int(self.brightness * 100)))
+            self.theme_index, self.audio.volume,
+            UserConfig.BRIGHTNESS_LABELS[self.brightness_index]))
         print()
 
     # -- theme ----------------------------------------------------------------
@@ -1228,6 +1339,9 @@ class SaberController:
         self.color_full = t["color"]
         self.color_idle = tuple(c // HWConfig.IDLE_COLOR_DIVISOR for c in t["color"])
         self.color_hit = t["hit_color"]
+        self.idle_anim = t.get("idle_anim", ANIM_BREATHE)
+        self.swing_anim = t.get("swing_anim", ANIM_SPIN)
+        self.hit_anim = t.get("hit_anim", ANIM_LIGHTNING)
 
     def _cycle_theme(self):
         self.theme_index = (self.theme_index + 1) % len(UserConfig.THEMES)
@@ -1241,7 +1355,7 @@ class SaberController:
         if self.hw.strip:
             self.hw.strip.brightness = self.brightness
             self.hw.strip.show()
-        pct = int(self.brightness * 100)
+        pct = UserConfig.BRIGHTNESS_LABELS[self.brightness_index]
         print("Brightness: {}%".format(pct))
         return pct
 
@@ -1408,25 +1522,29 @@ class SaberController:
             # Set idle brightness
             self.led.set_brightness(UserConfig.IDLE_BRIGHTNESS)
             self.led.strip_fill(self.color_idle, now)
-            self.led.onboard_breathe(self.color_idle, now)
+            self.led.onboard_animate(self.idle_anim, self.color_idle, now)
 
-            # Classify motion (poll() already ran earlier in the frame)
-            self.motion.print_diag(now)
-            event = self.motion.classify(now)
+            # Check for motion
+            sample = self.motion.poll(now)
+            if sample is not None:
+                smoothed, raw = sample
+                self.motion.print_diag(now)
 
-            if event == "hit":
-                print(">>> HIT d:{:.1f}".format(self.motion.delta_sq))
-                self.audio.stop()
-                self.audio.play(self.theme_index, "hit")
-                self.led.set_brightness(self.brightness)
-                self._change_state(STATE_HIT)
+                # Hit: raw force spike (catches sharp impacts)
+                if raw > UserConfig.HIT_THRESHOLD:
+                    print(">>> HIT: {:.1f} m/s²".format(raw))
+                    self.audio.stop()
+                    self.audio.play(self.theme_index, "hit")
+                    self.led.set_brightness(self.brightness)
+                    self._change_state(STATE_HIT)
 
-            elif event == "swing":
-                print(">> SWING nrg:{:.1f}".format(self.motion.swing_energy))
-                self.audio.stop()
-                self.audio.play(self.theme_index, "swing")
-                self.led.set_brightness(self.brightness)
-                self._change_state(STATE_SWING)
+                # Swing: sustained force above threshold (smoothed rejects noise)
+                elif smoothed > UserConfig.SWING_THRESHOLD:
+                    print(">> SWING: {:.1f} m/s²".format(smoothed))
+                    self.audio.stop()
+                    self.audio.play(self.theme_index, "swing")
+                    self.led.set_brightness(self.brightness)
+                    self._change_state(STATE_SWING)
 
         elif self.state == STATE_SWING:
             elapsed = self._state_elapsed()
@@ -1434,7 +1552,7 @@ class SaberController:
             t = min(elapsed * 2.0, 1.0)
             color = self.led.mix(self.color_full, self.color_idle, t)
             self.led.strip_fill(color, now)
-            self.led.onboard_spin(self.color_full, now - self._state_start)
+            self.led.onboard_animate(self.swing_anim, self.color_full, now - self._state_start)
 
             # Done when audio finishes (or fallback duration)
             if not self.audio.playing and elapsed >= HWConfig.SWING_DURATION_FALLBACK:
@@ -1451,7 +1569,14 @@ class SaberController:
             t = min(elapsed, 1.0)
             color = self.led.mix(self.color_hit, self.color_idle, t)
             self.led.strip_fill(color, now)
-            self.led.onboard_flash(self.color_hit, self.color_idle, elapsed)
+            # White flash for first 0.1s (impact feedback), then
+            # configured animation with blending color
+            if elapsed < 0.1:
+                self.led.onboard_white_flash()
+            else:
+                anim_t = min((elapsed - 0.1) * 2, 1.0)
+                anim_color = self.led.mix(self.color_hit, self.color_idle, anim_t)
+                self.led.onboard_animate(self.hit_anim, anim_color, now)
 
             # Done when audio finishes (or fallback duration)
             if not self.audio.playing and elapsed >= HWConfig.HIT_DURATION_FALLBACK:
@@ -1526,7 +1651,7 @@ class SaberController:
 
     def run(self):
         print("=== SABER READY ===")
-        print("delta thresholds: swing>{}, hit>{}".format(
+        print("force thresholds: swing>{:.1f} hit>{:.1f} m/s²".format(
             UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
         print("RIGHT=power  LEFT=theme")
         print("long: RIGHT=bright  LEFT=vol  A3=vol+  A4=vol-")
@@ -1549,23 +1674,20 @@ class SaberController:
                 # 4. Handle input actions
                 self._handle_inputs()
 
-                # 5. Sample accelerometer (every frame — keeps EMA filter warm)
+                # 5. State-specific updates (motion, LED, animation)
                 now = time.monotonic()
-                self.motion.poll(now)
-
-                # 6. State-specific updates (classification, LED, animation)
                 self._update_state(now)
 
-                # 7. Flush any rate-limited LED writes that were deferred
+                # 6. Flush any rate-limited LED writes that were deferred
                 self.led.flush_if_dirty(now)
 
-                # 8. Display timeout
+                # 7. Display timeout
                 self.display.poll()
 
-                # 9. Periodic maintenance
+                # 8. Periodic maintenance
                 self._maintenance(now)
 
-                # 10. Adaptive sleep — hold frame cadence steady
+                # 9. Adaptive sleep — hold frame cadence steady
                 elapsed = time.monotonic() - frame_start
                 remaining = FRAME_PERIOD - elapsed
                 if remaining > 0:
