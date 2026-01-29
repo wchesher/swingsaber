@@ -56,8 +56,12 @@ class UserConfig:
     ]
 
     # -- Motion ---------------------------------------------------------------
-    SWING_THRESHOLD = 15
-    HIT_THRESHOLD = 40
+    # Force thresholds in m/s² of absolute acceleration above resting gravity.
+    # Direction-independent: the same physical force triggers regardless of
+    # which way the saber is moved.
+    SWING_THRESHOLD = 4.0     # Sustained force to trigger swing (~0.4G)
+    HIT_THRESHOLD = 15.0      # Impact spike to trigger hit (~1.5G)
+    SMOOTHING_FACTOR = 0.4    # EMA alpha (0-1): higher = more responsive
 
     # -- Brightness -----------------------------------------------------------
     BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]
@@ -816,26 +820,47 @@ class InputManager:
 # MOTION ENGINE
 # =============================================================================
 #
-# Reads the accelerometer at a fixed interval and computes the delta
-# (change in acceleration) magnitude squared.  Delta-based detection
-# naturally ignores gravity.
+# Direction-independent force detection using acceleration magnitude.
+# Computes absolute force as the deviation from resting gravity (9.81 m/s²),
+# so the same physical motion triggers regardless of saber orientation.
+# Uses an exponential moving average (EMA) for swing detection (sustained
+# motion) and raw magnitude for hit detection (impact spikes).
 
 class MotionEngine:
-    """Accelerometer with delta-based swing/hit detection."""
+    """Direction-independent force detection via acceleration magnitude.
+
+    Instead of tracking per-axis deltas, we compute the magnitude of the
+    full acceleration vector and subtract gravity.  This yields a single
+    force value in m/s² that is identical regardless of orientation.
+
+    Two signals are produced each sample:
+      - smoothed: EMA-filtered force for swing detection (sustained motion)
+      - raw:      instantaneous force for hit detection (impact spikes)
+    """
+
+    _GRAVITY = 9.81  # m/s² — magnitude at rest
 
     def __init__(self, hw):
         self._hw = hw
-        self._prev = (0.0, 0.0, 0.0)
         self._error_count = 0
         self._enabled = hw.accel is not None
         self._disabled_time = 0
         self._last_recovery = 0
         self._last_sample = 0
         self._last_diag = 0
-        self.last_delta_sq = 0.0
+        self._smoothed = 0.0
+
+        # Public diagnostics
+        self.last_raw = 0.0
+        self.last_smoothed = 0.0
 
     def poll(self, now):
-        """Sample accelerometer if interval elapsed.  Returns (delta_sq, raw) or None."""
+        """Sample accelerometer if interval elapsed.
+
+        Returns (smoothed_force, raw_force) or None.
+          - smoothed_force: EMA-filtered, use for swing detection
+          - raw_force: instantaneous, use for hit/impact detection
+        """
         if not self._enabled:
             return None
         if now - self._last_sample < ACCEL_SAMPLE_INTERVAL:
@@ -845,14 +870,22 @@ class MotionEngine:
             return None
         try:
             ax, ay, az = self._hw.accel.acceleration
-            dx = ax - self._prev[0]
-            dy = ay - self._prev[1]
-            dz = az - self._prev[2]
-            self._prev = (ax, ay, az)
+
+            # Magnitude of the full acceleration vector (direction-independent)
+            mag = math.sqrt(ax * ax + ay * ay + az * az)
+
+            # Absolute force above rest — gravity cancels out regardless of
+            # which way the sensor is oriented
+            raw = abs(mag - self._GRAVITY)
+
+            # Exponential moving average for swing detection
+            a = UserConfig.SMOOTHING_FACTOR
+            self._smoothed = self._smoothed * (1.0 - a) + raw * a
+
+            self.last_raw = raw
+            self.last_smoothed = self._smoothed
             self._error_count = 0
-            dsq = dx * dx + dy * dy + dz * dz
-            self.last_delta_sq = dsq
-            return (dsq, ax, ay, az)
+            return (self._smoothed, raw)
         except Exception as e:
             self._error_count += 1
             if self._error_count >= UserConfig.MAX_ACCEL_ERRORS:
@@ -861,8 +894,6 @@ class MotionEngine:
                 self._disabled_time = now
             elif self._error_count % 5 == 0:
                 print("accel err {}: {}".format(self._error_count, e))
-            # Delay after error to prevent rapid-fire failures from disabling
-            # the accelerometer within a single frame
             time.sleep(0.01)
             return None
 
@@ -877,7 +908,7 @@ class MotionEngine:
         if self._hw.reinit_accel():
             self._enabled = True
             self._error_count = 0
-            self._prev = (0.0, 0.0, 0.0)
+            self._smoothed = 0.0
             print("accel recovered")
 
     def print_diag(self, now):
@@ -886,8 +917,9 @@ class MotionEngine:
         if now - self._last_diag < UserConfig.ACCEL_OUTPUT_INTERVAL:
             return
         self._last_diag = now
-        print("delta: {:.1f} (swing>{} hit>{})".format(
-            self.last_delta_sq, UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
+        print("force: raw={:.1f} smooth={:.1f} m/s² (swing>{:.1f} hit>{:.1f})".format(
+            self.last_raw, self.last_smoothed,
+            UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
 
 
 # =============================================================================
@@ -1329,19 +1361,20 @@ class SaberController:
             # Check for motion
             sample = self.motion.poll(now)
             if sample is not None:
-                dsq = sample[0]
+                smoothed, raw = sample
                 self.motion.print_diag(now)
 
-                if dsq > UserConfig.HIT_THRESHOLD:
-                    print(">>> HIT: {:.1f}".format(dsq))
-                    # Immediate transition: stop idle hum, play hit, switch state
+                # Hit: raw force spike (catches sharp impacts)
+                if raw > UserConfig.HIT_THRESHOLD:
+                    print(">>> HIT: {:.1f} m/s²".format(raw))
                     self.audio.stop()
                     self.audio.play(self.theme_index, "hit")
                     self.led.set_brightness(self.brightness)
                     self._change_state(STATE_HIT)
 
-                elif dsq > UserConfig.SWING_THRESHOLD:
-                    print(">> SWING: {:.1f}".format(dsq))
+                # Swing: sustained force above threshold (smoothed rejects noise)
+                elif smoothed > UserConfig.SWING_THRESHOLD:
+                    print(">> SWING: {:.1f} m/s²".format(smoothed))
                     self.audio.stop()
                     self.audio.play(self.theme_index, "swing")
                     self.led.set_brightness(self.brightness)
@@ -1445,7 +1478,7 @@ class SaberController:
 
     def run(self):
         print("=== SABER READY ===")
-        print("delta thresholds: swing>{}, hit>{}".format(
+        print("force thresholds: swing>{:.1f} hit>{:.1f} m/s²".format(
             UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
         print("RIGHT=power  LEFT=theme")
         print("long: RIGHT=bright  LEFT=vol  A3=vol+  A4=vol-")
