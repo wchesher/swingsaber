@@ -510,6 +510,7 @@ class AudioEngine:
         self._speaker_enable = speaker_enable
         self._audio = None       # audioio.AudioOut
         self._mixer = None       # audiomixer.Mixer (None = direct mode)
+        self._silence_buf = None # array buffer backing the silence sample
         self._silence = None     # tiny RawSample used to release voice refs
         self._wave_file = None   # open file handle for current clip
         self._wav = None         # audiocore.WaveFile for current clip
@@ -567,8 +568,9 @@ class AudioEngine:
             audio.play(mixer)
             self._mixer = mixer
             self._audio = audio
+            self._silence_buf = array.array('h', [0])
             self._silence = audiocore.RawSample(
-                array.array('h', [0]), sample_rate=sr)
+                self._silence_buf, sample_rate=sr)
             self._apply_volume()
             print("Audio: mixer ({}Hz {}bit)".format(sr, bits))
             return
@@ -627,17 +629,14 @@ class AudioEngine:
     def play(self, theme_index, name, loop=False):
         """Play sounds/{theme_index}{name}.wav.  Returns True on success."""
         if self._audio is None:
-            print("play SKIP (no audio)")
             return False
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
 
         if self._mixer is not None:
-            ok = self._play_mixer(filename, loop)
+            return self._play_mixer(filename, loop)
         else:
-            ok = self._play_direct(filename, loop)
-        print("play:", filename, "loop={}".format(loop), "ok={}".format(ok))
-        return ok
+            return self._play_direct(filename, loop)
 
     def _play_mixer(self, filename, loop):
         """Mixer mode: swap to silence, free old clip, then play new clip.
@@ -1702,10 +1701,11 @@ class SaberController:
             self.led.onboard_off()
 
         elif self.state == STATE_IDLE:
-            # Set idle brightness — scale by the user's brightness setting.
-            # (color_idle is already dimmed by IDLE_COLOR_DIVISOR, so we
-            # don't need the hard-coded 0.05 floor on top of that.)
-            self.led.set_brightness(self.brightness)
+            # Idle brightness scales with user setting but stays low to
+            # limit current draw on battery (55 pixels at full brightness
+            # can pull >1.5 A).  Range: ~0.02 at 25% up to ~0.07 at 100%.
+            idle_bright = self.brightness * 0.15
+            self.led.set_brightness(idle_bright)
             self.led.strip_fill(self.color_idle, now)
             self.led.onboard_animate(self.idle_anim, self.color_idle, now)
 
@@ -1783,8 +1783,9 @@ class SaberController:
         except Exception:
             pass
 
-        # Regular GC — only when not in an animation
-        if self.state in (STATE_OFF, STATE_IDLE):
+        # Regular GC — only when audio is NOT playing.  gc.collect() can
+        # stall the CPU long enough to starve the mixer's DMA refill.
+        if self.state == STATE_OFF:
             if now - self._last_gc > UserConfig.GC_INTERVAL:
                 gc.collect()
                 self._last_gc = now
