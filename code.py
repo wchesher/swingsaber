@@ -39,6 +39,27 @@ except ImportError:
 
 
 # =============================================================================
+# ANIMATION STYLES (for onboard NeoPixels)
+# =============================================================================
+
+ANIM_BREATHE = 0
+ANIM_SPIN = 1
+ANIM_LIGHTNING = 2
+ANIM_PULSE = 3
+ANIM_FIRE = 4
+ANIM_SPARKLE = 5
+
+_ANIM_NAMES = {
+    ANIM_BREATHE: "breathe",
+    ANIM_SPIN: "spin",
+    ANIM_LIGHTNING: "lightning",
+    ANIM_PULSE: "pulse",
+    ANIM_FIRE: "fire",
+    ANIM_SPARKLE: "sparkle",
+}
+
+
+# =============================================================================
 # USER SETTINGS
 # =============================================================================
 
@@ -49,10 +70,14 @@ class UserConfig:
     # Each theme needs: {index}on.wav, {index}off.wav, {index}idle.wav,
     #                    {index}swing.wav, {index}hit.wav, {index}switch.wav
     THEMES = [
-        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
-        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
-        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0)},
-        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
+        {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255),
+         "idle_anim": ANIM_BREATHE, "swing_anim": ANIM_SPIN, "hit_anim": ANIM_LIGHTNING},
+        {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0),
+         "idle_anim": ANIM_PULSE, "swing_anim": ANIM_SPARKLE, "hit_anim": ANIM_FIRE},
+        {"name": "ricknmorty", "color": (0, 255, 0, 0),   "hit_color": (255, 0, 0, 0),
+         "idle_anim": ANIM_FIRE, "swing_anim": ANIM_LIGHTNING, "hit_anim": ANIM_SPARKLE},
+        {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255),
+         "idle_anim": ANIM_SPARKLE, "swing_anim": ANIM_PULSE, "hit_anim": ANIM_SPIN},
     ]
 
     # -- Motion ---------------------------------------------------------------
@@ -1093,6 +1118,139 @@ class LEDEngine:
         except Exception:
             pass
 
+    def onboard_lightning(self, color, now):
+        """Random electrical crackle — overlapping sine waves create
+        chaotic flicker that simulates arcs jumping between pixels."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            for i in range(n):
+                # Two sine products at irrational-ish frequencies per pixel
+                v = (math.sin(now * 17.3 + i * 2.5)
+                     * math.sin(now * 23.1 + i * 4.1))
+                v += math.sin(now * 31.7 + i * 1.3) * 0.5
+                if v > 0.6:
+                    # Bright arc
+                    self._hw.onboard[i] = (
+                        min(255, int(color[0] + 80)),
+                        min(255, int(color[1] + 80)),
+                        min(255, int(color[2] + 80)),
+                    )
+                elif v > 0.1:
+                    self._hw.onboard[i] = (
+                        int(color[0] * 0.3),
+                        int(color[1] * 0.3),
+                        int(color[2] * 0.3),
+                    )
+                else:
+                    self._hw.onboard[i] = (
+                        int(color[0] * 0.05),
+                        int(color[1] * 0.05),
+                        int(color[2] * 0.05),
+                    )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_pulse(self, color, now):
+        """Heartbeat double-pulse: lub-dub … lub-dub.
+        Two quick beats followed by a longer rest period."""
+        if not self._hw.onboard:
+            return
+        try:
+            cycle = now % 1.2
+            if cycle < 0.08:
+                pulse = cycle / 0.08
+            elif cycle < 0.16:
+                pulse = 1.0 - (cycle - 0.08) / 0.08
+            elif cycle < 0.28:
+                pulse = 0.1
+            elif cycle < 0.36:
+                pulse = (cycle - 0.28) / 0.08 * 0.7
+            elif cycle < 0.44:
+                pulse = 0.7 - (cycle - 0.36) / 0.08 * 0.6
+            else:
+                pulse = 0.1
+            r = int(color[0] * pulse)
+            g = int(color[1] * pulse)
+            b = int(color[2] * pulse)
+            self._hw.onboard.fill((r, g, b))
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_fire(self, color, now):
+        """Flickering flame — each pixel independently flutters at
+        different rates, producing an organic fire-like shimmer."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            for i in range(n):
+                flicker = (
+                    0.3
+                    + 0.4 * abs(math.sin(now * (4.7 + i * 3.1) + i * 0.9))
+                    + 0.3 * abs(math.sin(now * (7.3 + i * 1.7) + i * 2.3))
+                )
+                if flicker > 1.0:
+                    flicker = 1.0
+                self._hw.onboard[i] = (
+                    int(color[0] * flicker),
+                    int(color[1] * flicker),
+                    int(color[2] * flicker),
+                )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_sparkle(self, color, now):
+        """Random sparkle/twinkle — pixels briefly flash bright then
+        fade quickly, creating a glittering effect."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            for i in range(n):
+                phase = (now * (3.7 + i * 2.3) + i * 1.1) % 1.0
+                if phase < 0.12:
+                    bright = 0.3 + 0.7 * math.sin(phase / 0.12 * math.pi)
+                else:
+                    bright = 0.08
+                self._hw.onboard[i] = (
+                    int(color[0] * bright),
+                    int(color[1] * bright),
+                    int(color[2] * bright),
+                )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_white_flash(self):
+        """Instant white flash on all onboard pixels (used for hit impact)."""
+        if not self._hw.onboard:
+            return
+        try:
+            self._hw.onboard.fill((255, 255, 255))
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_animate(self, style, color, now):
+        """Dispatch to the named onboard animation style."""
+        if style == ANIM_BREATHE:
+            self.onboard_breathe(color, now)
+        elif style == ANIM_SPIN:
+            self.onboard_spin(color, now)
+        elif style == ANIM_LIGHTNING:
+            self.onboard_lightning(color, now)
+        elif style == ANIM_PULSE:
+            self.onboard_pulse(color, now)
+        elif style == ANIM_FIRE:
+            self.onboard_fire(color, now)
+        elif style == ANIM_SPARKLE:
+            self.onboard_sparkle(color, now)
+
     def onboard_spinner(self, color, now):
         """Fast spinner for power transitions."""
         if not self._hw.onboard:
@@ -1147,10 +1305,13 @@ class SaberController:
         self.brightness_index = PersistentSettings.load_brightness()
         self.brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_index]
 
-        # Derived colors
+        # Derived colors + animation styles
         self.color_full = (0, 0, 0, 0)
         self.color_idle = (0, 0, 0, 0)
         self.color_hit = (0, 0, 0, 0)
+        self.idle_anim = ANIM_BREATHE
+        self.swing_anim = ANIM_SPIN
+        self.hit_anim = ANIM_LIGHTNING
         self._apply_theme()
 
         # Timing
@@ -1176,6 +1337,9 @@ class SaberController:
         self.color_full = t["color"]
         self.color_idle = tuple(c // HWConfig.IDLE_COLOR_DIVISOR for c in t["color"])
         self.color_hit = t["hit_color"]
+        self.idle_anim = t.get("idle_anim", ANIM_BREATHE)
+        self.swing_anim = t.get("swing_anim", ANIM_SPIN)
+        self.hit_anim = t.get("hit_anim", ANIM_LIGHTNING)
 
     def _cycle_theme(self):
         self.theme_index = (self.theme_index + 1) % len(UserConfig.THEMES)
@@ -1356,7 +1520,7 @@ class SaberController:
             # Set idle brightness
             self.led.set_brightness(UserConfig.IDLE_BRIGHTNESS)
             self.led.strip_fill(self.color_idle, now)
-            self.led.onboard_breathe(self.color_idle, now)
+            self.led.onboard_animate(self.idle_anim, self.color_idle, now)
 
             # Check for motion
             sample = self.motion.poll(now)
@@ -1386,7 +1550,7 @@ class SaberController:
             t = min(elapsed * 2.0, 1.0)
             color = self.led.mix(self.color_full, self.color_idle, t)
             self.led.strip_fill(color, now)
-            self.led.onboard_spin(self.color_full, now - self._state_start)
+            self.led.onboard_animate(self.swing_anim, self.color_full, now - self._state_start)
 
             # Done when audio finishes (or fallback duration)
             if not self.audio.playing and elapsed >= HWConfig.SWING_DURATION_FALLBACK:
@@ -1403,7 +1567,14 @@ class SaberController:
             t = min(elapsed, 1.0)
             color = self.led.mix(self.color_hit, self.color_idle, t)
             self.led.strip_fill(color, now)
-            self.led.onboard_flash(self.color_hit, self.color_idle, elapsed)
+            # White flash for first 0.1s (impact feedback), then
+            # configured animation with blending color
+            if elapsed < 0.1:
+                self.led.onboard_white_flash()
+            else:
+                anim_t = min((elapsed - 0.1) * 2, 1.0)
+                anim_color = self.led.mix(self.color_hit, self.color_idle, anim_t)
+                self.led.onboard_animate(self.hit_anim, anim_color, now)
 
             # Done when audio finishes (or fallback duration)
             if not self.audio.playing and elapsed >= HWConfig.HIT_DURATION_FALLBACK:
