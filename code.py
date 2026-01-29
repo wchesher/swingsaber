@@ -3,14 +3,21 @@
 # SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
 # SPDX-License-Identifier: MIT
 #
-# SwingSaber v2.0 - Complete Firmware Refactor
+# SwingSaber v3.0 - Audio-First Firmware
 # Target: Adafruit HalloWing M4 Express | CircuitPython 10.x
+# Speaker: 2W 8-ohm via 1.25mm JST -> onboard Class D amplifier
 #
 # Architecture priorities:
-#   1. Audio DMA is sacred - never starve it
-#   2. Fixed frame timing - all visuals on a steady cadence
-#   3. Zero blocking in the main loop - everything is non-blocking
-#   4. Single point of state change - no scattered transitions
+#   1. Audio DMA is sacred - continuous mixer, never restart DMA mid-session
+#   2. Real volume control - mixer voice level, not just a stored number
+#   3. Fixed frame timing - all visuals on a steady cadence
+#   4. Zero blocking in the main loop - everything is non-blocking
+#   5. Single point of state change - no scattered transitions
+#
+# WAV file requirements (best quality):
+#   Format:  16-bit signed PCM, 22050 Hz, mono
+#   Convert: sox input.wav -b 16 -r 22050 -c 1 output.wav
+#   Note:    8-bit/16kHz files work but sound noticeably worse
 # =============================================================================
 
 import time
@@ -21,6 +28,7 @@ import busio
 import neopixel
 import audioio
 import audiocore
+import audiomixer
 import adafruit_msa3xx
 import touchio
 import analogio
@@ -152,8 +160,9 @@ class HWConfig:
     ONBOARD_BRIGHTNESS = 0.3
     IDLE_COLOR_DIVISOR = 4
 
-    # Audio
-    AUDIO_BUFFER_SIZE = 8192
+    # Audio (mixer buffer in bytes — ~93ms at 22050Hz/16-bit)
+    MIXER_BUFFER_SIZE = 4096
+    WAV_READ_BUFFER = 2048
 
     # Battery ADC
     BATTERY_VOLTAGE_SAMPLES = 10
@@ -469,48 +478,116 @@ class Hardware:
 # AUDIO ENGINE
 # =============================================================================
 #
-# Design rules
-# ------------
-# 1. Audio DMA runs in hardware.  Our only obligation is to call play() with
-#    valid data and not deinit the AudioOut while DMA is running.
-# 2. We NEVER block waiting for audio to finish inside the main loop.
-#    Completion is checked once per frame via `poll()`.
-# 3. Transition between clips: stop → close old file → open new file → play.
-#    This is the fastest possible transition (~2-5 ms on SAMD51).  There is
-#    no way to cross-fade with a single AudioOut and no mixer, so we make the
-#    gap as short as humanly possible.
-# 4. reinit() fully tears down and rebuilds AudioOut.  Used only on power-on
-#    to guarantee a clean DMA slate.
+# Continuous-DMA architecture using audiomixer
+# ---------------------------------------------
+# The mixer starts at boot and runs until shutdown.  DMA to the DAC never
+# restarts during normal operation — this eliminates every pop and gap
+# between clips.
+#
+# Audio chain:  WaveFile → Mixer voice 0 → AudioOut(DAC) → Class D amp → speaker
+#
+# Volume is real: mixer.voice[0].level maps directly to output amplitude.
+# Transitions are seamless: voice.play(new_clip) atomically replaces the
+# current clip without restarting DMA.
+#
+# The only time we tear down the chain is reinit() — reserved for error
+# recovery, never called during normal power on/off.
 
 class AudioEngine:
-    """Minimal, reliable audio playback — one clip at a time."""
+    """Continuous-DMA audio — gapless transitions, real volume control."""
 
     def __init__(self, speaker_enable):
         self._speaker_enable = speaker_enable
-        self._audio = None
-        self._wave_file = None
-        self._wav = None
+        self._audio = None       # audioio.AudioOut — DAC output
+        self._mixer = None       # audiomixer.Mixer — software mix + volume
+        self._wave_file = None   # current open file handle
+        self._wav = None         # current audiocore.WaveFile
         self.volume = UserConfig.DEFAULT_VOLUME
         self.volume_preset_index = 1
 
+        # Detect WAV format from existing files (matches mixer to content)
+        self._sample_rate, self._bits, self._channels, self._signed = (
+            self._detect_format()
+        )
+
+        # Enable amplifier — leave on to avoid enable/disable pops
         if self._speaker_enable:
             self._speaker_enable.value = True
 
-        self._create_audio_out()
-        print("Audio OK")
+        self._init_chain()
 
-    # -- low-level ------------------------------------------------------------
+    # -- format detection -----------------------------------------------------
 
-    def _create_audio_out(self):
-        """Create a fresh AudioOut instance."""
+    @staticmethod
+    def _detect_format():
+        """Probe first available WAV to configure mixer format."""
+        for i in range(len(UserConfig.THEMES)):
+            for name in ("idle", "on", "swing"):
+                try:
+                    f = open("sounds/{}{}.wav".format(i, name), "rb")
+                    w = audiocore.WaveFile(f)
+                    sr = w.sample_rate
+                    bits = w.bits_per_sample
+                    ch = w.channel_count
+                    signed = bits == 16  # WAV: 8-bit=unsigned, 16-bit=signed
+                    f.close()
+                    quality = "OK" if bits >= 16 and sr >= 22050 else "LOW"
+                    print("WAV: {}Hz {}bit {}ch [{}]".format(sr, bits, ch, quality))
+                    if quality == "LOW":
+                        print("  upgrade to 16-bit 22050Hz for best quality")
+                        print("  sox in.wav -b 16 -r 22050 -c 1 out.wav")
+                    return sr, bits, ch, signed
+                except Exception:
+                    continue
+        print("WAV: no files found, default 22050Hz/16bit")
+        return 22050, 16, 1, True
+
+    # -- chain management -----------------------------------------------------
+
+    def _init_chain(self):
+        """Build: Mixer → AudioOut(DAC) → Class D amp → speaker.
+
+        Mixer starts immediately and runs until cleanup().  DMA never
+        restarts during normal operation.
+        """
         try:
-            self._audio = audioio.AudioOut(board.SPEAKER)
+            self._mixer = audiomixer.Mixer(
+                voice_count=1,
+                sample_rate=self._sample_rate,
+                channel_count=self._channels,
+                bits_per_sample=self._bits,
+                samples_signed=self._signed,
+                buffer_size=HWConfig.MIXER_BUFFER_SIZE,
+            )
+
+            self._audio = audioio.AudioOut(
+                board.SPEAKER,
+                quiescent_value=0x8000 if self._signed else 0x80,
+            )
+
+            # Start mixer — runs continuously until shutdown
+            self._audio.play(self._mixer)
+
+            # Apply initial volume
+            self._apply_volume()
+
+            print("Audio: mixer running ({}Hz {}bit buf={}B)".format(
+                self._sample_rate, self._bits, HWConfig.MIXER_BUFFER_SIZE))
         except Exception as e:
-            print("AudioOut err:", e)
+            print("Audio init FAIL:", e)
             self._audio = None
+            self._mixer = None
+
+    def _apply_volume(self):
+        """Push current volume to mixer output."""
+        if self._mixer is not None:
+            try:
+                self._mixer.voice[0].level = self.volume / 100.0
+            except Exception:
+                pass
 
     def _close_file(self):
-        """Close the current WAV file handle."""
+        """Release current WAV file handle."""
         if self._wave_file is not None:
             try:
                 self._wave_file.close()
@@ -519,74 +596,86 @@ class AudioEngine:
             self._wave_file = None
             self._wav = None
 
-    def _hard_stop(self):
-        """Stop DMA immediately and release the file."""
-        if self._audio is not None:
-            try:
-                self._audio.stop()
-            except Exception:
-                pass
-        self._close_file()
-
     # -- public API -----------------------------------------------------------
 
     def reinit(self):
-        """Full AudioOut teardown + rebuild — use sparingly (power-on only)."""
-        self._hard_stop()
+        """Full chain teardown + rebuild.  Error recovery only."""
+        self.stop()
         if self._audio is not None:
             try:
+                self._audio.stop()
                 self._audio.deinit()
             except Exception:
                 pass
-            self._audio = None
+        self._audio = None
+        self._mixer = None
         gc.collect()
-        self._create_audio_out()
+        self._init_chain()
 
     def play(self, theme_index, name, loop=False):
-        """Play sounds/{theme_index}{name}.wav.  Returns True if playing."""
-        if self._audio is None:
-            return False
+        """Play sounds/{theme_index}{name}.wav on mixer voice 0.
 
-        # Fastest possible transition: stop DMA → close old file → gc → open new → play
-        self._hard_stop()
-        gc.collect()  # free WAV buffer memory before allocating new one
+        Seamlessly replaces current clip — no DMA restart, no gap, no pop.
+        """
+        if self._mixer is None:
+            return False
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
+
+        # Open new file before touching old one
         try:
-            self._wave_file = open(filename, "rb")
-            self._wav = audiocore.WaveFile(self._wave_file)
+            new_file = open(filename, "rb")
         except OSError:
-            # Missing file is fine — device works without sounds
-            self._close_file()
-            return False
-        except Exception as e:
-            print("wav err:", e)
-            self._close_file()
             return False
 
         try:
-            self._audio.play(self._wav, loop=loop)
-            return True
+            new_wav = audiocore.WaveFile(
+                new_file, buffer_size=HWConfig.WAV_READ_BUFFER)
+        except Exception as e:
+            print("wav err:", e)
+            try:
+                new_file.close()
+            except Exception:
+                pass
+            return False
+
+        # Atomically switch voice to new clip
+        try:
+            self._mixer.voice[0].play(new_wav, loop=loop)
         except Exception as e:
             print("play err:", e)
-            self._close_file()
+            try:
+                new_file.close()
+            except Exception:
+                pass
             return False
+
+        # Voice has switched — safe to release old file
+        self._close_file()
+        self._wave_file = new_file
+        self._wav = new_wav
+        return True
 
     @property
     def playing(self):
-        if self._audio is None:
+        if self._mixer is None:
             return False
         try:
-            return self._audio.playing
+            return self._mixer.voice[0].playing
         except Exception:
             return False
 
     def stop(self):
-        """Stop playback immediately."""
-        self._hard_stop()
+        """Stop voice playback.  Mixer continues outputting silence."""
+        if self._mixer is not None:
+            try:
+                self._mixer.voice[0].stop()
+            except Exception:
+                pass
+        self._close_file()
 
     def poll(self):
-        """Call once per frame.  Cleans up finished non-looping clips."""
+        """Call once per frame.  Closes file handles for finished clips."""
         if self._wave_file is not None and not self.playing:
             self._close_file()
 
@@ -599,7 +688,9 @@ class AudioEngine:
             self._speaker_enable.value = True
 
     def set_volume(self, pct):
+        """Set volume 10-100%.  Applies immediately to mixer output."""
         self.volume = max(UserConfig.MIN_VOLUME, min(pct, UserConfig.MAX_VOLUME))
+        self._apply_volume()
         print("Volume: {}%".format(self.volume))
         return self.volume
 
@@ -614,13 +705,21 @@ class AudioEngine:
         return self.set_volume(UserConfig.VOLUME_PRESETS[self.volume_preset_index])
 
     def cleanup(self):
-        self._hard_stop()
+        """Shut down audio chain."""
+        self.stop()
         if self._audio is not None:
             try:
+                self._audio.stop()
                 self._audio.deinit()
             except Exception:
                 pass
             self._audio = None
+            self._mixer = None
+        if self._speaker_enable:
+            try:
+                self._speaker_enable.value = False
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -1288,7 +1387,7 @@ class SaberController:
     """
 
     def __init__(self):
-        print("\n=== SwingSaber v2.0 ===")
+        print("\n=== SwingSaber v3.0 ===")
         self.hw = Hardware()
         self.audio = AudioEngine(self.hw.speaker_enable)
         self.display = Display(self.hw.read_battery_pct)
@@ -1416,7 +1515,6 @@ class SaberController:
 
     def _animate_power_off(self):
         """Progressive blade retraction with audio."""
-        self.audio.stop()
         self.audio.play(self.theme_index, "off", loop=False)
         start = time.monotonic()
         dur = HWConfig.POWER_OFF_DURATION
@@ -1495,7 +1593,6 @@ class SaberController:
         if self.input.tap("right"):
             if self.state == STATE_OFF:
                 print("POWER ON")
-                self.audio.reinit()
                 self._change_state(STATE_POWER_ON)
                 self._animate_power_on()
                 self.audio.play(self.theme_index, "idle", loop=True)
@@ -1533,7 +1630,6 @@ class SaberController:
                 # Hit: raw force spike (catches sharp impacts)
                 if raw > UserConfig.HIT_THRESHOLD:
                     print(">>> HIT: {:.1f} m/s²".format(raw))
-                    self.audio.stop()
                     self.audio.play(self.theme_index, "hit")
                     self.led.set_brightness(self.brightness)
                     self._change_state(STATE_HIT)
@@ -1541,7 +1637,6 @@ class SaberController:
                 # Swing: sustained force above threshold (smoothed rejects noise)
                 elif smoothed > UserConfig.SWING_THRESHOLD:
                     print(">> SWING: {:.1f} m/s²".format(smoothed))
-                    self.audio.stop()
                     self.audio.play(self.theme_index, "swing")
                     self.led.set_brightness(self.brightness)
                     self._change_state(STATE_SWING)
