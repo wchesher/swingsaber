@@ -23,6 +23,7 @@
 import time
 import gc
 import math
+import array
 import board
 import busio
 import neopixel
@@ -509,6 +510,7 @@ class AudioEngine:
         self._speaker_enable = speaker_enable
         self._audio = None       # audioio.AudioOut
         self._mixer = None       # audiomixer.Mixer (None = direct mode)
+        self._silence = None     # tiny RawSample used to release voice refs
         self._wave_file = None   # open file handle for current clip
         self._wav = None         # audiocore.WaveFile for current clip
         self.volume = UserConfig.DEFAULT_VOLUME
@@ -565,6 +567,8 @@ class AudioEngine:
             audio.play(mixer)
             self._mixer = mixer
             self._audio = audio
+            self._silence = audiocore.RawSample(
+                array.array('h', [0]), sample_rate=sr)
             self._apply_volume()
             print("Audio: mixer ({}Hz {}bit)".format(sr, bits))
             return
@@ -636,27 +640,30 @@ class AudioEngine:
         return ok
 
     def _play_mixer(self, filename, loop):
-        """Mixer mode: stop voice, drain buffer, then play new clip."""
-        # 1. Stop the current voice so the mixer fills silence into its
-        #    output buffer instead of stale samples from the old clip.
+        """Mixer mode: swap to silence, free old clip, then play new clip.
+
+        Memory on the M4 is too tight for two WaveFile objects to coexist.
+        voice[0].stop() does NOT release the voice's internal C reference
+        to the old WaveFile, so gc cannot reclaim it.  Instead we play a
+        tiny silence sample — the atomic swap releases the old reference —
+        then gc.collect() frees the old WaveFile *before* we allocate the
+        new one.
+        """
+        # 1. Swap voice to silence placeholder.  This atomically replaces
+        #    the voice's internal reference so the old WaveFile becomes
+        #    unreferenced and eligible for gc.
         try:
-            self._mixer.voice[0].stop()
+            self._mixer.voice[0].play(self._silence, loop=True)
         except Exception:
             pass
 
-        # 2. Close old file — voice is stopped so nothing reads from it.
+        # 2. Drop Python refs and close old file handle.
         self._close_file()
 
-        # 3. Wait for the full mixer buffer to drain.  At 22050 Hz 16-bit
-        #    mono the 4096-byte buffer holds ~93 ms of audio.  Sleeping
-        #    120 ms guarantees the DMA has cycled through the entire buffer
-        #    and every remaining sample is now silence.
-        time.sleep(0.12)
-
-        # 4. Free old WaveFile + buffer before allocating the new one.
+        # 3. Free old WaveFile + buffer — only one WaveFile at a time.
         gc.collect()
 
-        # 5. Open and play the new clip.
+        # 4. Open and play the new clip.
         try:
             new_file = open(filename, "rb")
         except OSError as e:
