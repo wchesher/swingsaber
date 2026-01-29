@@ -56,8 +56,13 @@ class UserConfig:
     ]
 
     # -- Motion ---------------------------------------------------------------
-    SWING_THRESHOLD = 15
-    HIT_THRESHOLD = 40
+    # Swing energy accumulates during sustained motion; a brief bump won't
+    # reach this but a real arc will.  Hit is an instantaneous spike on the
+    # EMA-filtered delta — sharp impacts punch through the filter.
+    # Tune with diagnostics: watch "nrg:" for swing, "Δ:" for hit.
+    SWING_THRESHOLD = 10     # accumulated swing energy (sustained motion)
+    HIT_THRESHOLD = 20       # instantaneous filtered delta² (sharp impact)
+    MOTION_COOLDOWN = 0.15   # seconds between events (prevents re-trigger)
 
     # -- Brightness -----------------------------------------------------------
     BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]
@@ -816,58 +821,133 @@ class InputManager:
 # MOTION ENGINE
 # =============================================================================
 #
-# Reads the accelerometer at a fixed interval and computes the delta
-# (change in acceleration) magnitude squared.  Delta-based detection
-# naturally ignores gravity.
+# Two-stage pipeline:
+#   1. poll()     — samples the accelerometer, runs an EMA low-pass filter,
+#                   computes delta (change in filtered accel), and feeds two
+#                   detection signals: instantaneous delta² and swing energy.
+#   2. classify() — compares detection signals against thresholds and applies
+#                   a cooldown timer.  Returns 'hit', 'swing', or None.
+#
+# The controller calls poll() every frame (keeps the filter warm across all
+# states) and classify() only when in IDLE.  This means the filter is always
+# up-to-date and detection is instant when returning from swing/hit.
+#
+# Detection signals:
+#   delta_sq     — instantaneous squared magnitude of the delta between
+#                  consecutive EMA-filtered readings.  Sharp impacts punch
+#                  through the filter and produce large single-sample spikes.
+#   swing_energy — exponential moving sum of delta_sq.  Sustained moderate
+#                  motion (an arc swing) accumulates energy over several
+#                  samples; a brief noise spike decays before reaching the
+#                  threshold.  This naturally separates swings from bumps.
+#
+# EMA filter:  filtered = α·raw + (1-α)·prev_filtered
+#   α = 0.4 gives moderate smoothing (~2-3 sample settling time at 15 ms
+#   interval).  This cuts high-frequency noise while keeping latency under
+#   50 ms — fast enough that swing detection still feels instant.
 
 class MotionEngine:
-    """Accelerometer with delta-based swing/hit detection."""
+    """Filtered accelerometer with energy-based swing and spike-based hit detection."""
+
+    _EMA_ALPHA = 0.4       # filter smoothing (0 = heavy, 1 = none)
+    _SWING_DECAY = 0.65    # per-sample energy decay (lower = faster decay)
 
     def __init__(self, hw):
         self._hw = hw
-        self._prev = (0.0, 0.0, 0.0)
-        self._error_count = 0
         self._enabled = hw.accel is not None
-        self._disabled_time = 0
+        self._error_count = 0
         self._last_recovery = 0
         self._last_sample = 0
         self._last_diag = 0
-        self.last_delta_sq = 0.0
+        self._last_event = 0
+
+        # Filter state (None = uninitialized, first sample seeds)
+        self._ema = None
+        self._prev = None
+
+        # Detection signals — public for diagnostics
+        self.delta_sq = 0.0       # instantaneous filtered delta²
+        self.swing_energy = 0.0   # accumulated swing energy
+
+    # -- sampling & filtering -------------------------------------------------
 
     def poll(self, now):
-        """Sample accelerometer if interval elapsed.  Returns (delta_sq, raw) or None."""
-        if not self._enabled:
-            return None
+        """Sample accelerometer and update detection signals.  Returns True
+        if a new sample was taken, False if skipped or unavailable."""
+        if not self._enabled or self._hw.accel is None:
+            return False
         if now - self._last_sample < ACCEL_SAMPLE_INTERVAL:
-            return None
+            return False
         self._last_sample = now
-        if self._hw.accel is None:
-            return None
+
         try:
             ax, ay, az = self._hw.accel.acceleration
-            dx = ax - self._prev[0]
-            dy = ay - self._prev[1]
-            dz = az - self._prev[2]
-            self._prev = (ax, ay, az)
-            self._error_count = 0
-            dsq = dx * dx + dy * dy + dz * dz
-            self.last_delta_sq = dsq
-            return (dsq, ax, ay, az)
         except Exception as e:
             self._error_count += 1
             if self._error_count >= UserConfig.MAX_ACCEL_ERRORS:
                 print("accel disabled ({} errs)".format(self._error_count))
                 self._enabled = False
-                self._disabled_time = now
             elif self._error_count % 5 == 0:
                 print("accel err {}: {}".format(self._error_count, e))
-            # Delay after error to prevent rapid-fire failures from disabling
-            # the accelerometer within a single frame
             time.sleep(0.01)
+            return False
+        self._error_count = 0
+
+        # Seed the filter on the very first valid reading
+        if self._ema is None:
+            self._ema = (ax, ay, az)
+            self._prev = (ax, ay, az)
+            return True
+
+        # EMA low-pass filter
+        a = self._EMA_ALPHA
+        b = 1.0 - a
+        ex = a * ax + b * self._ema[0]
+        ey = a * ay + b * self._ema[1]
+        ez = a * az + b * self._ema[2]
+        self._ema = (ex, ey, ez)
+
+        # Delta on filtered signal (gravity cancels, noise reduced)
+        dx = ex - self._prev[0]
+        dy = ey - self._prev[1]
+        dz = ez - self._prev[2]
+        self._prev = (ex, ey, ez)
+        dsq = dx * dx + dy * dy + dz * dz
+        self.delta_sq = dsq
+
+        # Swing energy: builds during sustained motion, decays at rest
+        self.swing_energy = self.swing_energy * self._SWING_DECAY + dsq
+
+        return True
+
+    # -- classification -------------------------------------------------------
+
+    def classify(self, now):
+        """Classify current motion.  Returns 'hit', 'swing', or None.
+        Call only when the saber is in IDLE — poll() should run every frame."""
+        if self._ema is None:
+            return None
+        if now - self._last_event < UserConfig.MOTION_COOLDOWN:
             return None
 
+        # Hit: sharp spike in instantaneous delta (impacts punch through EMA)
+        if self.delta_sq > UserConfig.HIT_THRESHOLD:
+            self._last_event = now
+            self.swing_energy = 0.0
+            return "hit"
+
+        # Swing: sustained motion has built up energy over several samples
+        if self.swing_energy > UserConfig.SWING_THRESHOLD:
+            self._last_event = now
+            self.swing_energy = 0.0
+            return "swing"
+
+        return None
+
+    # -- recovery & diagnostics -----------------------------------------------
+
     def try_recover(self, now):
-        """Attempt recovery if disabled.  Call from maintenance path."""
+        """Attempt accelerometer recovery if disabled."""
         if self._enabled:
             return
         if now - self._last_recovery < UserConfig.ACCEL_RECOVERY_INTERVAL:
@@ -877,7 +957,9 @@ class MotionEngine:
         if self._hw.reinit_accel():
             self._enabled = True
             self._error_count = 0
-            self._prev = (0.0, 0.0, 0.0)
+            self._ema = None
+            self._prev = None
+            self.swing_energy = 0.0
             print("accel recovered")
 
     def print_diag(self, now):
@@ -886,8 +968,9 @@ class MotionEngine:
         if now - self._last_diag < UserConfig.ACCEL_OUTPUT_INTERVAL:
             return
         self._last_diag = now
-        print("delta: {:.1f} (swing>{} hit>{})".format(
-            self.last_delta_sq, UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
+        print("nrg:{:.1f} d:{:.1f} (swing>{} hit>{})".format(
+            self.swing_energy, self.delta_sq,
+            UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
 
 
 # =============================================================================
@@ -1085,16 +1168,16 @@ class SaberController:
     Top-level coordinator.
 
     Main loop cadence (per frame, ~20 ms target):
-      1. Feed watchdog                   (< 0.01 ms)
-      2. Poll audio engine               (< 0.01 ms)
-      3. Poll inputs                     (< 0.5 ms)
-      4. Handle input actions            (varies)
-      5. Poll accelerometer              (< 1 ms)
-      6. Process state logic             (< 0.5 ms)
-      7. Update LEDs (strip + onboard)   (< 4 ms)
-      8. Poll display timeout            (< 0.01 ms)
-      9. Periodic maintenance (GC/batt)  (< 1 ms, occasionally 10 ms for batt)
-     10. Sleep remainder of frame        (adaptive)
+      1. Feed watchdog                       (< 0.01 ms)
+      2. Poll audio engine                   (< 0.01 ms)
+      3. Poll inputs                         (< 0.5 ms)
+      4. Handle input actions                (varies)
+      5. Sample accelerometer + EMA filter   (< 1 ms, every frame)
+      6. Classify motion + state logic       (< 0.5 ms)
+      7. Update LEDs (strip + onboard)       (< 4 ms)
+      8. Poll display timeout                (< 0.01 ms)
+      9. Periodic maintenance (GC/batt)      (< 1 ms, occasionally 10 ms)
+     10. Sleep remainder of frame            (adaptive)
     """
 
     def __init__(self):
@@ -1327,26 +1410,23 @@ class SaberController:
             self.led.strip_fill(self.color_idle, now)
             self.led.onboard_breathe(self.color_idle, now)
 
-            # Check for motion
-            sample = self.motion.poll(now)
-            if sample is not None:
-                dsq = sample[0]
-                self.motion.print_diag(now)
+            # Classify motion (poll() already ran earlier in the frame)
+            self.motion.print_diag(now)
+            event = self.motion.classify(now)
 
-                if dsq > UserConfig.HIT_THRESHOLD:
-                    print(">>> HIT: {:.1f}".format(dsq))
-                    # Immediate transition: stop idle hum, play hit, switch state
-                    self.audio.stop()
-                    self.audio.play(self.theme_index, "hit")
-                    self.led.set_brightness(self.brightness)
-                    self._change_state(STATE_HIT)
+            if event == "hit":
+                print(">>> HIT d:{:.1f}".format(self.motion.delta_sq))
+                self.audio.stop()
+                self.audio.play(self.theme_index, "hit")
+                self.led.set_brightness(self.brightness)
+                self._change_state(STATE_HIT)
 
-                elif dsq > UserConfig.SWING_THRESHOLD:
-                    print(">> SWING: {:.1f}".format(dsq))
-                    self.audio.stop()
-                    self.audio.play(self.theme_index, "swing")
-                    self.led.set_brightness(self.brightness)
-                    self._change_state(STATE_SWING)
+            elif event == "swing":
+                print(">> SWING nrg:{:.1f}".format(self.motion.swing_energy))
+                self.audio.stop()
+                self.audio.play(self.theme_index, "swing")
+                self.led.set_brightness(self.brightness)
+                self._change_state(STATE_SWING)
 
         elif self.state == STATE_SWING:
             elapsed = self._state_elapsed()
@@ -1469,20 +1549,23 @@ class SaberController:
                 # 4. Handle input actions
                 self._handle_inputs()
 
-                # 5. State-specific updates (motion, LED, animation)
+                # 5. Sample accelerometer (every frame — keeps EMA filter warm)
                 now = time.monotonic()
+                self.motion.poll(now)
+
+                # 6. State-specific updates (classification, LED, animation)
                 self._update_state(now)
 
-                # 6. Flush any rate-limited LED writes that were deferred
+                # 7. Flush any rate-limited LED writes that were deferred
                 self.led.flush_if_dirty(now)
 
-                # 7. Display timeout
+                # 8. Display timeout
                 self.display.poll()
 
-                # 8. Periodic maintenance
+                # 9. Periodic maintenance
                 self._maintenance(now)
 
-                # 9. Adaptive sleep — hold frame cadence steady
+                # 10. Adaptive sleep — hold frame cadence steady
                 elapsed = time.monotonic() - frame_start
                 remaining = FRAME_PERIOD - elapsed
                 if remaining > 0:
