@@ -162,7 +162,7 @@ class HWConfig:
     IDLE_COLOR_DIVISOR = 4
 
     # Audio (mixer buffer in bytes — ~93ms at 22050Hz/16-bit)
-    MIXER_BUFFER_SIZE = 4096
+    MIXER_BUFFER_SIZE = 1024
 
 
     # Battery ADC
@@ -528,23 +528,24 @@ class AudioEngine:
 
     # -- chain setup ----------------------------------------------------------
 
-    def _detect_format(self):
-        """Probe first available WAV to configure mixer format."""
+    @staticmethod
+    def _detect_format():
+        """Parse WAV header raw — no WaveFile allocation."""
         for i in range(len(UserConfig.THEMES)):
             for name in ("idle", "on", "swing"):
                 try:
                     f = open("sounds/{}{}.wav".format(i, name), "rb")
-                    w = audiocore.WaveFile(f)
-                    sr = w.sample_rate
-                    bits = w.bits_per_sample
-                    ch = w.channel_count
-                    signed = bits == 16
+                    hdr = f.read(36)
                     f.close()
-                    quality = "OK" if bits >= 16 and sr >= 22050 else "LOW"
-                    print("WAV: {}Hz {}bit {}ch [{}]".format(
-                        sr, bits, ch, quality))
-                    if quality == "LOW":
-                        print("  upgrade: sox in.wav -b 16 -r 22050 -c 1 out.wav")
+                    if len(hdr) < 36:
+                        continue
+                    if hdr[:4] != b"RIFF" or hdr[8:12] != b"WAVE":
+                        continue
+                    ch = hdr[22] | (hdr[23] << 8)
+                    sr = hdr[24] | (hdr[25] << 8) | (hdr[26] << 16) | (hdr[27] << 24)
+                    bits = hdr[34] | (hdr[35] << 8)
+                    signed = bits == 16
+                    print("WAV: {}Hz {}bit {}ch".format(sr, bits, ch))
                     return sr, bits, ch, signed
                 except Exception:
                     continue
@@ -820,7 +821,7 @@ class Display:
         self._timeout = UserConfig.DISPLAY_TIMEOUT
 
         try:
-            board.DISPLAY.auto_refresh = True
+            board.DISPLAY.auto_refresh = False
             board.DISPLAY.brightness = 0
         except Exception:
             pass
@@ -858,6 +859,7 @@ class Display:
                 self._group.append(grp)
             board.DISPLAY.root_group = self._group
             board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
+            board.DISPLAY.refresh()
             self._start = time.monotonic()
             self._timeout = UserConfig.DISPLAY_TIMEOUT
             self._active = True
