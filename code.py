@@ -1409,10 +1409,14 @@ class SaberController:
         # Final state: full idle color
         self.led.strip_fill_force(self.color_idle)
 
-        # Wait for power-on sound to finish (with watchdog)
+        # Wait for power-on sound to finish (with watchdog + timeout)
+        wait_start = time.monotonic()
         while self.audio.playing:
             self.hw.feed_watchdog()
             time.sleep(0.03)
+            if time.monotonic() - wait_start > 3.0:
+                print("audio wait timeout (on)")
+                break
 
     def _animate_power_off(self):
         """Progressive blade retraction with audio."""
@@ -1437,10 +1441,14 @@ class SaberController:
         self.led.strip_fill_force(0)
         self.led.onboard_off()
 
-        # Wait for power-off sound to finish
+        # Wait for power-off sound to finish (with timeout)
+        wait_start = time.monotonic()
         while self.audio.playing:
             self.hw.feed_watchdog()
             time.sleep(0.03)
+            if time.monotonic() - wait_start > 3.0:
+                print("audio wait timeout (off)")
+                break
 
     # -- input actions --------------------------------------------------------
 
@@ -1657,53 +1665,64 @@ class SaberController:
         print("long: RIGHT=bright  LEFT=vol  A3=vol+  A4=vol-")
         print()
 
+        consecutive_errors = 0
         try:
             while True:
-                frame_start = time.monotonic()
-                self._loop_count += 1
+                try:
+                    frame_start = time.monotonic()
+                    self._loop_count += 1
 
-                # 1. Watchdog — absolute first thing
-                self.hw.feed_watchdog()
+                    # 1. Watchdog — absolute first thing
+                    self.hw.feed_watchdog()
 
-                # 2. Audio housekeeping (close finished files)
-                self.audio.poll()
+                    # 2. Audio housekeeping (close finished files)
+                    self.audio.poll()
 
-                # 3. Read all inputs (non-blocking edge detection)
-                self.input.poll()
+                    # 3. Read all inputs (non-blocking edge detection)
+                    self.input.poll()
 
-                # 4. Handle input actions
-                self._handle_inputs()
+                    # 4. Handle input actions
+                    self._handle_inputs()
 
-                # 5. State-specific updates (motion, LED, animation)
-                now = time.monotonic()
-                self._update_state(now)
+                    # 5. State-specific updates (motion, LED, animation)
+                    now = time.monotonic()
+                    self._update_state(now)
 
-                # 6. Flush any rate-limited LED writes that were deferred
-                self.led.flush_if_dirty(now)
+                    # 6. Flush any rate-limited LED writes that were deferred
+                    self.led.flush_if_dirty(now)
 
-                # 7. Display timeout
-                self.display.poll()
+                    # 7. Display timeout
+                    self.display.poll()
 
-                # 8. Periodic maintenance
-                self._maintenance(now)
+                    # 8. Periodic maintenance
+                    self._maintenance(now)
 
-                # 9. Adaptive sleep — hold frame cadence steady
-                elapsed = time.monotonic() - frame_start
-                remaining = FRAME_PERIOD - elapsed
-                if remaining > 0:
-                    time.sleep(remaining)
+                    # 9. Adaptive sleep — hold frame cadence steady
+                    elapsed = time.monotonic() - frame_start
+                    remaining = FRAME_PERIOD - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
+
+                    consecutive_errors = 0
+
+                except MemoryError:
+                    gc.collect()
+                    print("MEM recovered: {} free".format(gc.mem_free()))
+                    consecutive_errors += 1
+
+                except Exception as e:
+                    print("loop err:", e)
+                    consecutive_errors += 1
+                    self.hw.feed_watchdog()
+                    time.sleep(0.05)
+
+                if consecutive_errors >= 20:
+                    print("too many errors, restarting controller")
+                    break
 
         except KeyboardInterrupt:
             print("\nShutdown...")
             self.cleanup()
-        except MemoryError as e:
-            print("\nMEM:", e)
-            gc.collect()
-            print("recovered: {} free".format(gc.mem_free()))
-        except Exception as e:
-            print("\nFATAL:", e)
-            self.cleanup()
-            raise
 
     def cleanup(self):
         print("cleanup...")
@@ -1727,15 +1746,38 @@ class SaberController:
 # =============================================================================
 
 def main():
-    ctrl = None
-    try:
-        ctrl = SaberController()
-        ctrl.run()
-    except Exception as e:
-        print("\nFATAL:", e)
-        if ctrl:
-            ctrl.cleanup()
-        raise
+    MAX_RESTARTS = 5
+    restarts = 0
+
+    while restarts < MAX_RESTARTS:
+        ctrl = None
+        try:
+            ctrl = SaberController()
+            ctrl.run()
+            # run() only returns on consecutive error threshold or KeyboardInterrupt
+            break
+        except KeyboardInterrupt:
+            if ctrl:
+                ctrl.cleanup()
+            break
+        except MemoryError:
+            gc.collect()
+            print("RESTART (mem): {} free".format(gc.mem_free()))
+        except Exception as e:
+            print("RESTART ({}): {}".format(restarts + 1, e))
+        finally:
+            if ctrl:
+                try:
+                    ctrl.cleanup()
+                except Exception:
+                    pass
+
+        restarts += 1
+        gc.collect()
+        time.sleep(1.0)
+
+    if restarts >= MAX_RESTARTS:
+        print("max restarts reached, halting")
 
 
 if __name__ == "__main__":
