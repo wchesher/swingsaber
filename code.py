@@ -161,7 +161,7 @@ class HWConfig:
     IDLE_COLOR_DIVISOR = 4
 
     # Audio (mixer buffer in bytes — ~93ms at 22050Hz/16-bit)
-    MIXER_BUFFER_SIZE = 2048
+    MIXER_BUFFER_SIZE = 1024
 
 
     # Battery ADC
