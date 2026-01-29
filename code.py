@@ -1045,6 +1045,7 @@ class LEDEngine:
             try:
                 if self._hw.strip.brightness != value:
                     self._hw.strip.brightness = value
+                    self._hw.strip.show()
             except Exception:
                 pass
 
@@ -1279,12 +1280,11 @@ class SaberController:
       2. Poll audio engine               (< 0.01 ms)
       3. Poll inputs                     (< 0.5 ms)
       4. Handle input actions            (varies)
-      5. Poll accelerometer              (< 1 ms)
-      6. Process state logic             (< 0.5 ms)
-      7. Update LEDs (strip + onboard)   (< 4 ms)
-      8. Poll display timeout            (< 0.01 ms)
-      9. Periodic maintenance (GC/batt)  (< 1 ms, occasionally 10 ms for batt)
-     10. Sleep remainder of frame        (adaptive)
+      5. Process state logic             (< 0.5 ms)
+      6. Update LEDs (strip + onboard)   (< 4 ms)
+      7. Poll display timeout            (< 0.01 ms)
+      8. Periodic maintenance (GC/batt)  (< 1 ms, occasionally 10 ms for batt)
+      9. Sleep remainder of frame        (adaptive)
     """
 
     def __init__(self):
