@@ -690,6 +690,9 @@ class AudioEngine:
                 pass
             return False
 
+        # Re-apply volume — play() may reset the voice level.
+        self._apply_volume()
+
         self._wave_file = new_file
         self._wav = new_wav
         return True
@@ -1699,8 +1702,10 @@ class SaberController:
             self.led.onboard_off()
 
         elif self.state == STATE_IDLE:
-            # Set idle brightness
-            self.led.set_brightness(UserConfig.IDLE_BRIGHTNESS)
+            # Set idle brightness — scale by the user's brightness setting.
+            # (color_idle is already dimmed by IDLE_COLOR_DIVISOR, so we
+            # don't need the hard-coded 0.05 floor on top of that.)
+            self.led.set_brightness(self.brightness)
             self.led.strip_fill(self.color_idle, now)
             self.led.onboard_animate(self.idle_anim, self.color_idle, now)
 
