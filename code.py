@@ -623,26 +623,50 @@ class AudioEngine:
     def play(self, theme_index, name, loop=False):
         """Play sounds/{theme_index}{name}.wav.  Returns True on success."""
         if self._audio is None:
+            print("play SKIP (no audio)")
             return False
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
 
         if self._mixer is not None:
-            return self._play_mixer(filename, loop)
+            ok = self._play_mixer(filename, loop)
         else:
-            return self._play_direct(filename, loop)
+            ok = self._play_direct(filename, loop)
+        print("play:", filename, "loop={}".format(loop), "ok={}".format(ok))
+        return ok
 
     def _play_mixer(self, filename, loop):
-        """Mixer mode: atomically switch voice, then settle and release old clip."""
+        """Mixer mode: stop voice, drain buffer, then play new clip."""
+        # 1. Stop the current voice so the mixer fills silence into its
+        #    output buffer instead of stale samples from the old clip.
+        try:
+            self._mixer.voice[0].stop()
+        except Exception:
+            pass
+
+        # 2. Close old file — voice is stopped so nothing reads from it.
+        self._close_file()
+
+        # 3. Wait for the full mixer buffer to drain.  At 22050 Hz 16-bit
+        #    mono the 4096-byte buffer holds ~93 ms of audio.  Sleeping
+        #    120 ms guarantees the DMA has cycled through the entire buffer
+        #    and every remaining sample is now silence.
+        time.sleep(0.12)
+
+        # 4. Free old WaveFile + buffer before allocating the new one.
+        gc.collect()
+
+        # 5. Open and play the new clip.
         try:
             new_file = open(filename, "rb")
-        except OSError:
+        except OSError as e:
+            print("open err:", filename, e)
             return False
 
         try:
             new_wav = audiocore.WaveFile(new_file)
         except Exception as e:
-            print("wav err:", e)
+            print("wav err:", filename, e)
             try:
                 new_file.close()
             except Exception:
@@ -652,27 +676,15 @@ class AudioEngine:
         try:
             self._mixer.voice[0].play(new_wav, loop=loop)
         except Exception as e:
-            print("play err:", e)
+            print("play err:", filename, e)
             try:
                 new_file.close()
             except Exception:
                 pass
             return False
 
-        # Voice atomically switched — the DMA may still be draining a few
-        # samples from the old clip's buffer.  Keep the old file handle
-        # alive for 30 ms so the DMA never reads freed memory, then close
-        # it and reclaim the buffer.
-        old_file = self._wave_file
         self._wave_file = new_file
         self._wav = new_wav
-        time.sleep(0.03)          # 30 ms — let DMA finish with old buffer
-        if old_file is not None:
-            try:
-                old_file.close()
-            except Exception:
-                pass
-        gc.collect()              # reclaim old WAV buffer memory
         return True
 
     def _play_direct(self, filename, loop):
