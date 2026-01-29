@@ -987,6 +987,7 @@ class LEDEngine:
             try:
                 if self._hw.strip.brightness != value:
                     self._hw.strip.brightness = value
+                    self._hw.strip.show()
             except Exception:
                 pass
 
