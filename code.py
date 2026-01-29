@@ -3,74 +3,51 @@
 # SPDX-FileCopyrightText: © 2024-2025 William C. Chesher <wchesher@gmail.com>
 # SPDX-License-Identifier: MIT
 #
-# SwingSaber v1.1 - Interactive Lightsaber Controller
+# SwingSaber v2.0 - Complete Firmware Refactor
 # Target: Adafruit HalloWing M4 Express | CircuitPython 10.x
-# =============================================================================
 #
-# PROJECT OVERVIEW:
-# Firmware for a motion-controlled lightsaber toy. Detects movement via
-# accelerometer and responds with LED animations and sound effects.
-#
-# HARDWARE: HalloWing M4 (ATSAMD51 processor, MSA311 accelerometer, 1.44" TFT,
-# speaker, 4 touch pads, NeoPixel port, LiPo battery connector)
-#
-# KEY CONCEPTS:
-# - State Machine: System is always in one state (OFF/IDLE/SWING/HIT/etc.)
-# - Debouncing: Prevents multiple triggers from a single button press
-# - Watchdog: Auto-resets device if code gets stuck
+# Architecture priorities:
+#   1. Audio DMA is sacred - never starve it
+#   2. Fixed frame timing - all visuals on a steady cadence
+#   3. Zero blocking in the main loop - everything is non-blocking
+#   4. Single point of state change - no scattered transitions
 # =============================================================================
 
-# === IMPORTS ===
-# Libraries provide pre-built functionality (like tools from a toolbox)
-
-import time      # Timing: sleep(), monotonic()
-import gc        # Garbage Collector - frees unused memory
-import math      # Math functions (sqrt, etc.)
-import board     # Hardware pin definitions
-import busio     # I2C/SPI communication buses
-import neopixel  # Addressable RGB LED control
-import audioio   # Audio output
-import audiocore # WAV file handling
-import adafruit_msa3xx  # Accelerometer driver
-import touchio   # Capacitive touch input
-import analogio  # Analog voltage reading
-import supervisor  # System supervisor (USB detection, etc.)
-import displayio  # Display/graphics management
-import terminalio  # Built-in font
-import microcontroller  # Low-level MCU access (NVM storage)
+import time
+import gc
+import math
+import board
+import busio
+import neopixel
+import audioio
+import audiocore
+import adafruit_msa3xx
+import touchio
+import analogio
+import supervisor
+import displayio
+import terminalio
+import microcontroller
 from digitalio import DigitalInOut
 from adafruit_display_text import label
 
-# Watchdog: Hardware timer that resets device if code hangs
-# Must be "fed" regularly to prove code is running
 try:
     from watchdog import WatchDogMode
-    WATCHDOG_AVAILABLE = True
+    _WATCHDOG_AVAILABLE = True
 except ImportError:
-    WATCHDOG_AVAILABLE = False
+    _WATCHDOG_AVAILABLE = False
 
 
 # =============================================================================
-# USER SETTINGS - Customize these to make the saber your own!
+# USER SETTINGS
 # =============================================================================
 
 class UserConfig:
-    """Settings you'll want to customize. Most important ones are at the top!"""
+    """All user-tunable parameters in one place."""
 
-    # ==========================================================================
-    # THEMES - Your saber's personality! Change colors and sounds here.
-    # ==========================================================================
-    # Each theme needs matching sound files in /sounds folder:
-    #   0on.wav, 0off.wav, 0idle.wav, 0swing.wav, 0hit.wav, 0switch.wav
-    #   1on.wav, 1off.wav, etc. (number matches theme index)
-    #
-    # Colors are RGBW format: (Red, Green, Blue, White) each 0-255
-    #   Red only:    (255, 0, 0, 0)
-    #   Green only:  (0, 255, 0, 0)
-    #   Blue only:   (0, 0, 255, 0)
-    #   Purple:      (255, 0, 255, 0)
-    #   White:       (0, 0, 0, 255) or (255, 255, 255, 255)
-    #
+    # -- Themes ---------------------------------------------------------------
+    # Each theme needs: {index}on.wav, {index}off.wav, {index}idle.wav,
+    #                    {index}swing.wav, {index}hit.wav, {index}switch.wav
     THEMES = [
         {"name": "jedi",       "color": (0, 0, 255, 0),   "hit_color": (255, 255, 255, 255)},
         {"name": "powerpuff",  "color": (255, 0, 255, 0), "hit_color": (0, 200, 255, 0)},
@@ -78,90 +55,35 @@ class UserConfig:
         {"name": "spongebob",  "color": (255, 255, 0, 0), "hit_color": (255, 255, 255, 255)},
     ]
 
-    # ==========================================================================
-    # MOTION SENSITIVITY - How easily swings and hits trigger
-    # ==========================================================================
-    # Watch console output to tune: "delta: 5.2 (swing>15 hit>40)"
-    # Lower = more sensitive, Higher = needs bigger movements
-    #
-    SWING_THRESHOLD = 15    # Gentle swing triggers at this level
-    HIT_THRESHOLD = 40      # Hard impact/clash triggers at this level
+    # -- Motion ---------------------------------------------------------------
+    SWING_THRESHOLD = 15
+    HIT_THRESHOLD = 40
 
-    # ==========================================================================
-    # BRIGHTNESS - How bright the blade glows
-    # ==========================================================================
-    # Long-press RIGHT button to cycle through these presets
-    # Max safe brightness ~40% with 1781 battery (1A current limit)
-    #
-    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]  # 15%, 25%, 35%
-    NEOPIXEL_ACTIVE_BRIGHTNESS = 0.25        # Default brightness (25%)
-    NEOPIXEL_IDLE_BRIGHTNESS = 0.05          # Dim glow when idle (5%)
+    # -- Brightness -----------------------------------------------------------
+    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]
+    DEFAULT_BRIGHTNESS = 0.25
+    IDLE_BRIGHTNESS = 0.05
 
-    # ==========================================================================
-    # VOLUME - Sound levels
-    # ==========================================================================
-    # Long-press LEFT button to cycle through these presets
-    #
-    VOLUME_PRESETS = [30, 50, 70, 100]  # Quiet, Medium, Loud, Max
+    # -- Volume ---------------------------------------------------------------
+    VOLUME_PRESETS = [30, 50, 70, 100]
     DEFAULT_VOLUME = 70
-
-    # ==========================================================================
-    # DISPLAY - Screen settings
-    # ==========================================================================
-    DISPLAY_BRIGHTNESS = 0.3       # Screen brightness (0.0-1.0)
-    DISPLAY_TIMEOUT_NORMAL = 2.0   # Seconds before screen auto-off
-
-    # ==========================================================================
-    # LESS COMMON SETTINGS - You probably don't need to change these
-    # ==========================================================================
-
-    # Volume fine-tuning
-    VOLUME_STEP = 10    # How much A3/A4 long-press changes volume
+    VOLUME_STEP = 10
     MIN_VOLUME = 10
     MAX_VOLUME = 100
 
-    # Console output (set to False to hide accelerometer readings)
+    # -- Display --------------------------------------------------------------
+    DISPLAY_BRIGHTNESS = 0.3
+    DISPLAY_TIMEOUT = 2.0
+
+    # -- Diagnostics ----------------------------------------------------------
     ENABLE_DIAGNOSTICS = True
-    ACCEL_OUTPUT_INTERVAL = 0.5   # How often to show accel values (seconds)
+    ACCEL_OUTPUT_INTERVAL = 0.5
 
-    # Touch input timing
-    TOUCH_DEBOUNCE_TIME = 0.02  # Ignore rapid re-triggers (20ms)
-    LONG_PRESS_TIME = 1.0       # Hold time for long press (1 second)
+    # -- Touch ----------------------------------------------------------------
+    TOUCH_DEBOUNCE_TIME = 0.02
+    LONG_PRESS_TIME = 1.0
 
-    # ==========================================================================
-    # ADVANCED SETTINGS - Only change if you know what you're doing
-    # ==========================================================================
-
-    # Loop timing (affects responsiveness vs audio quality)
-    IDLE_LOOP_DELAY = 0.05      # 50ms between checks when idle
-    ACTIVE_LOOP_DELAY = 0.025   # 25ms between checks when active
-    LED_UPDATE_INTERVAL = 0.05  # 50ms between LED updates (20 FPS)
-
-    # Audio processing
-    STOP_AUDIO_WHEN_IDLE = True
-    FADE_TRANSITION_DURATION = 0.1  # Audio fade time (100ms)
-
-    # Battery monitoring
-    BATTERY_CHECK_INTERVAL = 30.0    # Check every 30 seconds
-    BATTERY_WARNING_THRESHOLD = 15   # Warn at 15%
-    BATTERY_CRITICAL_THRESHOLD = 5   # Critical at 5%
-    BATTERY_WARNING_INTERVAL = 60.0  # Don't spam warnings
-
-    # Memory management
-    MAX_IMAGE_CACHE_SIZE = 4
-    GC_INTERVAL = 10.0
-    CRITICAL_MEMORY_THRESHOLD = 8192
-
-    # Error recovery
-    MAX_ACCEL_ERRORS = 10
-    ERROR_RECOVERY_DELAY = 0.1
-    ACCEL_RECOVERY_INTERVAL = 30.0
-
-    # Watchdog (auto-reset if code freezes)
-    ENABLE_WATCHDOG = True
-    WATCHDOG_TIMEOUT = 8.0
-
-    # Persistent storage addresses (don't change)
+    # -- Persistent storage ---------------------------------------------------
     ENABLE_PERSISTENT_SETTINGS = True
     NVM_THEME_OFFSET = 0
     NVM_VOLUME_OFFSET = 1
@@ -169,97 +91,114 @@ class UserConfig:
     NVM_MAGIC_OFFSET = 3
     NVM_MAGIC_VALUE = 0xAB
 
+    # -- Battery --------------------------------------------------------------
+    BATTERY_CHECK_INTERVAL = 30.0
+    BATTERY_WARNING_THRESHOLD = 15
+    BATTERY_CRITICAL_THRESHOLD = 5
+    BATTERY_WARNING_INTERVAL = 60.0
+
+    # -- Watchdog -------------------------------------------------------------
+    ENABLE_WATCHDOG = True
+    WATCHDOG_TIMEOUT = 8.0
+
+    # -- Memory ---------------------------------------------------------------
+    MAX_IMAGE_CACHE_SIZE = 4
+    GC_INTERVAL = 10.0
+    CRITICAL_MEMORY_THRESHOLD = 8192
+
+    # -- Accelerometer recovery -----------------------------------------------
+    MAX_ACCEL_ERRORS = 10
+    ACCEL_RECOVERY_INTERVAL = 30.0
+
 
 # =============================================================================
-# HARDWARE CONFIGURATION - Physical constants
+# HARDWARE CONSTANTS
 # =============================================================================
 
-class SaberConfig:
-    """Hardware configuration constants. Generally don't modify."""
+class HWConfig:
+    """Fixed hardware parameters — do not change unless hardware changes."""
 
-    # Pin definitions
-    CAP_PIN = board.CAP_PIN
-    SPEAKER_ENABLE_PIN = board.SPEAKER_ENABLE
-    VOLTAGE_MONITOR_PIN = board.VOLTAGE_MONITOR
-
-    # NeoPixel LED strip (Adafruit 4914: RGBW strip, 60 LEDs per meter)
     NUM_PIXELS = 55
-    IDLE_COLOR_DIVISOR = 4  # Dim idle color to 25% of full brightness
-
-    # Onboard NeoPixels (HalloWing M4 has 4 RGB pixels around the eye)
     ONBOARD_PIXELS = 4
     ONBOARD_BRIGHTNESS = 0.3
+    IDLE_COLOR_DIVISOR = 4
 
-    # ==========================================================================
-    # STATE MACHINE - The saber is always in exactly ONE of these states
-    # ==========================================================================
-    # Think of states like modes: the saber behaves differently in each one.
-    # OFF -> user presses power -> IDLE (blade on, waiting for motion)
-    # IDLE -> user swings -> SWING (play swing sound/animation)
-    # IDLE -> user hits something -> HIT (play clash sound/animation)
-    # Any state -> user presses power -> OFF (blade retracts)
+    # Audio
+    AUDIO_BUFFER_SIZE = 8192
 
-    STATE_OFF = 0         # Blade is dark, saber is "sleeping"
-    STATE_IDLE = 1        # Blade is lit, waiting for motion
-    STATE_SWING = 2       # Swing detected, playing swing effect
-    STATE_HIT = 3         # Impact detected, playing clash effect
-    STATE_TRANSITION = 4  # Animating between states (power on/off)
-    STATE_ERROR = 5       # Something went wrong
-
-    # Human-readable names for console output
-    STATE_NAMES = {0: "OFF", 1: "IDLE", 2: "SWING", 3: "HIT", 4: "TRANS", 5: "ERROR"}
-
-    # Which state transitions are allowed (prevents bugs from impossible states)
-    # Format: FROM_STATE: [list of allowed TO_STATES]
-    VALID_TRANSITIONS = {
-        STATE_OFF: [STATE_TRANSITION, STATE_ERROR],
-        STATE_IDLE: [STATE_SWING, STATE_HIT, STATE_TRANSITION, STATE_ERROR],
-        STATE_SWING: [STATE_IDLE, STATE_TRANSITION, STATE_ERROR],
-        STATE_HIT: [STATE_IDLE, STATE_TRANSITION, STATE_ERROR],
-        STATE_TRANSITION: [STATE_OFF, STATE_IDLE, STATE_SWING, STATE_HIT, STATE_ERROR],
-        STATE_ERROR: [STATE_OFF],
-    }
-
-    # Display timing
-    DISPLAY_TIMEOUT = UserConfig.DISPLAY_TIMEOUT_NORMAL
-    IMAGE_DISPLAY_DURATION = 3.0
-
-    # Animation timing
-    POWER_ON_DURATION = 1.7
-    POWER_OFF_DURATION = 1.15
-    FADE_OUT_DURATION = 0.5
-    SWING_BLEND_MIDPOINT = 0.5
-    SWING_BLEND_SCALE = 2.0
-    # Fallback durations when audio files are missing
-    SWING_DURATION_NO_AUDIO = 0.5  # Swing animation without audio
-    HIT_DURATION_NO_AUDIO = 0.8    # Hit animation without audio
-
-    # Battery (LiPo: 3.3V empty, 4.2V full)
+    # Battery ADC
     BATTERY_VOLTAGE_SAMPLES = 10
     BATTERY_MIN_VOLTAGE = 3.3
     BATTERY_MAX_VOLTAGE = 4.2
     BATTERY_ADC_MAX = 65535
     BATTERY_VOLTAGE_DIVIDER = 2
 
-    # Audio buffer settings (larger buffer = smoother audio, more latency)
-    SILENCE_SAMPLE_SIZE = 1024
-    AUDIO_STOP_CHECK_INTERVAL = 0.03
-    AUDIO_BUFFER_SIZE = 8192  # Increased for cleaner audio on SAMD51
-    FADE_IN_SAMPLES = 100
-    FADE_OUT_SAMPLES = 100
+    # Animation durations
+    POWER_ON_DURATION = 1.7
+    POWER_OFF_DURATION = 1.15
+    SWING_DURATION_FALLBACK = 0.5
+    HIT_DURATION_FALLBACK = 0.8
+
+    # Display
+    IMAGE_DISPLAY_DURATION = 3.0
 
 
 # =============================================================================
-# PERSISTENT SETTINGS (NVM Storage)
-# Saves settings to chip memory so they survive power-off
+# FRAME TIMING
+# =============================================================================
+#
+# Everything visual runs locked to a fixed cadence.  Audio DMA runs
+# independently in hardware; our job is to never starve it by doing long
+# blocking operations.  LED strip.show() for 55 RGBW pixels takes ~3.5 ms
+# at 800 kHz.  We budget a 20 ms frame (50 FPS) which leaves >16 ms of
+# headroom per frame for everything else.
+#
+# The main loop measures how long each iteration took and sleeps only the
+# remainder, so frame timing stays consistent regardless of workload.
+
+FRAME_PERIOD = 0.020          # 20 ms = 50 FPS target
+LED_MIN_INTERVAL = 0.018      # never push LED data faster than this
+ACCEL_SAMPLE_INTERVAL = 0.015 # poll accelerometer every 15 ms
+
+
+# =============================================================================
+# STATE DEFINITIONS
+# =============================================================================
+
+STATE_OFF = 0
+STATE_IDLE = 1
+STATE_SWING = 2
+STATE_HIT = 3
+STATE_POWER_ON = 4
+STATE_POWER_OFF = 5
+STATE_ERROR = 6
+
+_STATE_NAMES = {
+    0: "OFF", 1: "IDLE", 2: "SWING", 3: "HIT",
+    4: "PWR_ON", 5: "PWR_OFF", 6: "ERROR",
+}
+
+# Allowed transitions (from -> set of legal destinations)
+_VALID_TRANSITIONS = {
+    STATE_OFF:       {STATE_POWER_ON, STATE_ERROR},
+    STATE_IDLE:      {STATE_SWING, STATE_HIT, STATE_POWER_OFF, STATE_ERROR},
+    STATE_SWING:     {STATE_IDLE, STATE_POWER_OFF, STATE_ERROR},
+    STATE_HIT:       {STATE_IDLE, STATE_POWER_OFF, STATE_ERROR},
+    STATE_POWER_ON:  {STATE_IDLE, STATE_ERROR},
+    STATE_POWER_OFF: {STATE_OFF, STATE_ERROR},
+    STATE_ERROR:     {STATE_OFF},
+}
+
+
+# =============================================================================
+# PERSISTENT SETTINGS (NVM)
 # =============================================================================
 
 class PersistentSettings:
-    """Save/load settings to Non-Volatile Memory (survives power-off)."""
+    """Read/write settings to non-volatile memory."""
 
     @staticmethod
-    def is_valid():
-        """Check if NVM contains valid data (magic byte matches)."""
+    def _valid():
         if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
             return False
         try:
@@ -268,218 +207,206 @@ class PersistentSettings:
             return False
 
     @staticmethod
+    def _write(offset, value):
+        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
+            return False
+        try:
+            microcontroller.nvm[offset] = value
+            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
+            return True
+        except Exception as e:
+            print("NVM write error:", e)
+            return False
+
+    @staticmethod
     def load_theme():
-        """Load theme index from NVM (returns 0 if invalid)."""
-        if not PersistentSettings.is_valid():
+        if not PersistentSettings._valid():
             return 0
         try:
-            theme = microcontroller.nvm[UserConfig.NVM_THEME_OFFSET]
-            if theme < len(UserConfig.THEMES):
-                return theme
+            v = microcontroller.nvm[UserConfig.NVM_THEME_OFFSET]
+            return v if v < len(UserConfig.THEMES) else 0
         except Exception:
-            pass
-        return 0
+            return 0
 
     @staticmethod
     def load_volume():
-        """Load volume from NVM (returns default if invalid)."""
-        if not PersistentSettings.is_valid():
+        if not PersistentSettings._valid():
             return UserConfig.DEFAULT_VOLUME
         try:
-            volume = microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET]
-            if UserConfig.MIN_VOLUME <= volume <= UserConfig.MAX_VOLUME:
-                return volume
+            v = microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET]
+            return v if UserConfig.MIN_VOLUME <= v <= UserConfig.MAX_VOLUME else UserConfig.DEFAULT_VOLUME
         except Exception:
-            pass
-        return UserConfig.DEFAULT_VOLUME
-
-    @staticmethod
-    def save_theme(theme_index):
-        """Save theme to NVM."""
-        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
-            return False
-        try:
-            microcontroller.nvm[UserConfig.NVM_THEME_OFFSET] = theme_index
-            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
-            return True
-        except Exception as e:
-            print("Error saving theme:", e)
-            return False
-
-    @staticmethod
-    def save_volume(volume):
-        """Save volume to NVM."""
-        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
-            return False
-        try:
-            microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET] = volume
-            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
-            return True
-        except Exception as e:
-            print("Error saving volume:", e)
-            return False
+            return UserConfig.DEFAULT_VOLUME
 
     @staticmethod
     def load_brightness():
-        """Load brightness preset index from NVM (returns 1 if invalid)."""
-        if not PersistentSettings.is_valid():
-            return 1  # Default to middle preset (25%)
+        if not PersistentSettings._valid():
+            return 1
         try:
-            index = microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET]
-            if index < len(UserConfig.BRIGHTNESS_PRESETS):
-                return index
+            v = microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET]
+            return v if v < len(UserConfig.BRIGHTNESS_PRESETS) else 1
         except Exception:
-            pass
-        return 1
+            return 1
 
     @staticmethod
-    def save_brightness(brightness_index):
-        """Save brightness preset index to NVM."""
-        if not UserConfig.ENABLE_PERSISTENT_SETTINGS:
-            return False
-        try:
-            microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET] = brightness_index
-            microcontroller.nvm[UserConfig.NVM_MAGIC_OFFSET] = UserConfig.NVM_MAGIC_VALUE
-            return True
-        except Exception as e:
-            print("Error saving brightness:", e)
-            return False
+    def save_theme(idx):
+        return PersistentSettings._write(UserConfig.NVM_THEME_OFFSET, idx)
+
+    @staticmethod
+    def save_volume(vol):
+        return PersistentSettings._write(UserConfig.NVM_VOLUME_OFFSET, vol)
+
+    @staticmethod
+    def save_brightness(idx):
+        return PersistentSettings._write(UserConfig.NVM_BRIGHTNESS_OFFSET, idx)
 
 
 # =============================================================================
-# HARDWARE SETUP
+# HARDWARE LAYER
 # =============================================================================
 
-class SaberHardware:
-    """Initialize and manage all hardware components."""
+class Hardware:
+    """Owns every physical peripheral.  Initializes once, provides accessors."""
 
     def __init__(self):
-        print("Initializing Saber Hardware...")
+        print("HW init...")
+        self.ok = {"strip": False, "touch": False, "accel": False, "battery": False}
 
-        self.hardware_status = {
-            "strip": False, "touch": False, "accel": False, "battery": False
-        }
-
-        # Capacitive touch reference pin
+        # Cap reference pin
         try:
-            self.cap_pin = DigitalInOut(SaberConfig.CAP_PIN)
+            self.cap_pin = DigitalInOut(board.CAP_PIN)
             self.cap_pin.switch_to_output(value=False)
-        except Exception as e:
-            print("  CAP_PIN error:", e)
+        except Exception:
             self.cap_pin = None
 
         # Speaker enable
         try:
-            self.speaker_enable = DigitalInOut(SaberConfig.SPEAKER_ENABLE_PIN)
+            self.speaker_enable = DigitalInOut(board.SPEAKER_ENABLE)
             self.speaker_enable.switch_to_output(value=True)
         except Exception as e:
-            print("  SPEAKER_ENABLE error:", e)
+            print("  speaker enable err:", e)
             self.speaker_enable = None
 
-        # Battery voltage monitor
+        # Battery ADC
         try:
-            self.battery_voltage = analogio.AnalogIn(SaberConfig.VOLTAGE_MONITOR_PIN)
-            self.hardware_status["battery"] = True
-        except Exception as e:
-            print("  VOLTAGE_MONITOR error:", e)
-            self.battery_voltage = None
+            self.battery_adc = analogio.AnalogIn(board.VOLTAGE_MONITOR)
+            self.ok["battery"] = True
+        except Exception:
+            self.battery_adc = None
 
-        self.strip = self._init_strip()
-        self.onboard = self._init_onboard_pixels()
+        # NeoPixel strip
+        self.strip = None
+        try:
+            self.strip = neopixel.NeoPixel(
+                board.EXTERNAL_NEOPIXEL, HWConfig.NUM_PIXELS,
+                brightness=UserConfig.DEFAULT_BRIGHTNESS,
+                auto_write=False, pixel_order=neopixel.GRBW,
+            )
+            self.strip.fill(0)
+            self.strip.show()
+            self.ok["strip"] = True
+            print("  strip OK")
+        except Exception as e:
+            print("  strip err:", e)
+
+        # Onboard pixels
+        self.onboard = None
+        try:
+            self.onboard = neopixel.NeoPixel(
+                board.NEOPIXEL, HWConfig.ONBOARD_PIXELS,
+                brightness=HWConfig.ONBOARD_BRIGHTNESS,
+                auto_write=False,
+            )
+            self.onboard.fill(0)
+            self.onboard.show()
+            print("  onboard OK")
+        except Exception as e:
+            print("  onboard err:", e)
+
+        # Touch inputs
         self.touch_left = None
         self.touch_right = None
-        self.touch_batt_a3 = None
-        self.touch_batt_a4 = None
-        self._init_touch()
-        self.accel = self._init_accel()
-
-        print("Hardware init complete.")
-        print("Status:", self.hardware_status)
-        print()
-
-    def _init_strip(self):
-        """Initialize NeoPixel LED strip."""
-        try:
-            strip = neopixel.NeoPixel(
-                board.EXTERNAL_NEOPIXEL,
-                SaberConfig.NUM_PIXELS,
-                brightness=UserConfig.NEOPIXEL_ACTIVE_BRIGHTNESS,
-                auto_write=False,
-                pixel_order=neopixel.GRBW
-            )
-            strip.fill(0)
-            strip.show()
-            print("  NeoPixel strip OK.")
-            self.hardware_status["strip"] = True
-            return strip
-        except Exception as e:
-            print("  NeoPixel error:", e)
-            return None
-
-    def _init_onboard_pixels(self):
-        """Initialize onboard NeoPixels (around the eye on HalloWing M4)."""
-        try:
-            pixels = neopixel.NeoPixel(
-                board.NEOPIXEL,
-                SaberConfig.ONBOARD_PIXELS,
-                brightness=SaberConfig.ONBOARD_BRIGHTNESS,
-                auto_write=False
-            )
-            pixels.fill(0)
-            pixels.show()
-            print("  Onboard pixels OK.")
-            return pixels
-        except Exception as e:
-            print("  Onboard pixels error:", e)
-            return None
-
-    def _init_touch(self):
-        """Initialize capacitive touch inputs."""
+        self.touch_a3 = None
+        self.touch_a4 = None
         try:
             self.touch_left = touchio.TouchIn(board.TOUCH1)
             self.touch_right = touchio.TouchIn(board.TOUCH4)
-            self.touch_batt_a3 = touchio.TouchIn(board.A3)
-            self.touch_batt_a4 = touchio.TouchIn(board.A4)
-            print("  Touch inputs OK.")
-            self.hardware_status["touch"] = True
+            self.touch_a3 = touchio.TouchIn(board.A3)
+            self.touch_a4 = touchio.TouchIn(board.A4)
+            self.ok["touch"] = True
+            print("  touch OK")
         except Exception as e:
-            print("  Touch error:", e)
+            print("  touch err:", e)
+
+        # Accelerometer
+        self.accel = None
+        self.i2c = None
+        self._init_accel()
+
+        # Watchdog
+        self.watchdog = None
+        if UserConfig.ENABLE_WATCHDOG and _WATCHDOG_AVAILABLE:
+            try:
+                self.watchdog = microcontroller.watchdog
+                self.watchdog.timeout = UserConfig.WATCHDOG_TIMEOUT
+                self.watchdog.mode = WatchDogMode.RESET
+                print("  watchdog OK ({}s)".format(UserConfig.WATCHDOG_TIMEOUT))
+            except Exception as e:
+                print("  watchdog err:", e)
+
+        print("HW ready:", self.ok)
 
     def _init_accel(self):
-        """Initialize accelerometer. Store I2C bus reference to prevent GC."""
         try:
-            self.i2c_bus = busio.I2C(board.SCL, board.SDA)
-            accel = adafruit_msa3xx.MSA311(self.i2c_bus)
-            print("  Accelerometer OK.")
-            self.hardware_status["accel"] = True
-            return accel
+            self.i2c = busio.I2C(board.SCL, board.SDA)
+            self.accel = adafruit_msa3xx.MSA311(self.i2c)
+            self.ok["accel"] = True
+            print("  accel OK")
         except Exception as e:
-            print("  Accel error:", e)
-            self.i2c_bus = None
-            return None
+            print("  accel err:", e)
+            self.accel = None
 
-    def try_reinit_accel(self):
-        """Attempt to recover failed accelerometer."""
+    def reinit_accel(self):
+        """Try to re-establish the accelerometer after errors."""
         if self.accel is not None:
             return True
+        if self.i2c is not None:
+            try:
+                self.i2c.deinit()
+            except Exception:
+                pass
+            self.i2c = None
+        self._init_accel()
+        return self.accel is not None
+
+    def feed_watchdog(self):
+        if self.watchdog is not None:
+            try:
+                self.watchdog.feed()
+            except Exception:
+                pass
+
+    def read_battery_pct(self):
+        """Return battery percentage (int) or the string 'USB'."""
+        if supervisor.runtime.usb_connected:
+            return "USB"
+        if not self.battery_adc:
+            return 0
         try:
-            if hasattr(self, 'i2c_bus') and self.i2c_bus is not None:
-                try:
-                    self.i2c_bus.deinit()
-                except Exception:
-                    pass
-            self.i2c_bus = busio.I2C(board.SCL, board.SDA)
-            self.accel = adafruit_msa3xx.MSA311(self.i2c_bus)
-            self.hardware_status["accel"] = True
-            self.accel_error_count = 0
-            print("  Accelerometer recovered!")
-            return True
+            total = 0
+            for _ in range(HWConfig.BATTERY_VOLTAGE_SAMPLES):
+                total += self.battery_adc.value
+                # 0.001 s × 10 = 10 ms total — acceptable, only runs every 30 s
+                time.sleep(0.001)
+            avg = total / HWConfig.BATTERY_VOLTAGE_SAMPLES
+            voltage = (avg / HWConfig.BATTERY_ADC_MAX) * self.battery_adc.reference_voltage * HWConfig.BATTERY_VOLTAGE_DIVIDER
+            pct = (voltage - HWConfig.BATTERY_MIN_VOLTAGE) / (HWConfig.BATTERY_MAX_VOLTAGE - HWConfig.BATTERY_MIN_VOLTAGE) * 100
+            return min(max(int(pct), 0), 100)
         except Exception as e:
-            print("  Accel reinit failed:", e)
-            return False
+            print("batt err:", e)
+            return 0
 
     def cleanup(self):
-        """Clean up hardware resources."""
         if self.strip:
             try:
                 self.strip.fill(0)
@@ -497,62 +424,152 @@ class SaberHardware:
                 self.speaker_enable.value = False
             except Exception:
                 pass
-        if hasattr(self, 'i2c_bus') and self.i2c_bus is not None:
+        if self.i2c:
             try:
-                self.i2c_bus.deinit()
+                self.i2c.deinit()
+            except Exception:
+                pass
+        if self.watchdog is not None:
+            try:
+                self.watchdog.mode = None
             except Exception:
                 pass
 
 
 # =============================================================================
-# AUDIO MANAGER
+# AUDIO ENGINE
 # =============================================================================
+#
+# Design rules
+# ------------
+# 1. Audio DMA runs in hardware.  Our only obligation is to call play() with
+#    valid data and not deinit the AudioOut while DMA is running.
+# 2. We NEVER block waiting for audio to finish inside the main loop.
+#    Completion is checked once per frame via `poll()`.
+# 3. Transition between clips: stop → close old file → open new file → play.
+#    This is the fastest possible transition (~2-5 ms on SAMD51).  There is
+#    no way to cross-fade with a single AudioOut and no mixer, so we make the
+#    gap as short as humanly possible.
+# 4. reinit() fully tears down and rebuilds AudioOut.  Used only on power-on
+#    to guarantee a clean DMA slate.
 
-class AudioManager:
-    """Handle audio playback with direct audioio (no mixer)."""
+class AudioEngine:
+    """Minimal, reliable audio playback — one clip at a time."""
 
-    def __init__(self, speaker_enable=None):
-        self.speaker_enable = speaker_enable
-        self.audio = None
-
-        # Enable speaker output (required for HalloWing M4)
-        if self.speaker_enable:
-            self.speaker_enable.value = True
-            print("  Speaker enabled.")
-
-        try:
-            self.audio = audioio.AudioOut(board.SPEAKER)
-            print("Audio system OK (direct mode).")
-        except Exception as e:
-            print("Audio init error:", e)
-            self.audio = None
-
-        self.current_wave_file = None
-        self.current_wav = None
+    def __init__(self, speaker_enable):
+        self._speaker_enable = speaker_enable
+        self._audio = None
+        self._wave_file = None
+        self._wav = None
         self.volume = UserConfig.DEFAULT_VOLUME
         self.volume_preset_index = 1
 
-        # Fade state
-        self.fade_start_time = None
-        self.fade_duration = 0
-        self.is_fading = False
+        if self._speaker_enable:
+            self._speaker_enable.value = True
 
-        print("  Audio volume: {}%".format(self.volume))
+        self._create_audio_out()
+        print("Audio OK")
 
-    def _close_current_file(self):
-        """Close current audio file (important for resource management)."""
-        if self.current_wave_file is not None:
+    # -- low-level ------------------------------------------------------------
+
+    def _create_audio_out(self):
+        """Create a fresh AudioOut instance."""
+        try:
+            self._audio = audioio.AudioOut(board.SPEAKER)
+        except Exception as e:
+            print("AudioOut err:", e)
+            self._audio = None
+
+    def _close_file(self):
+        """Close the current WAV file handle."""
+        if self._wave_file is not None:
             try:
-                self.current_wave_file.close()
-            except Exception as e:
-                print("Error closing audio file:", e)
-            finally:
-                self.current_wave_file = None
-                self.current_wav = None
+                self._wave_file.close()
+            except Exception:
+                pass
+            self._wave_file = None
+            self._wav = None
 
-    def set_volume(self, volume_percent):
-        self.volume = max(UserConfig.MIN_VOLUME, min(volume_percent, UserConfig.MAX_VOLUME))
-        print("Volume: {}%".format(self.volume))
+    def _hard_stop(self):
+        """Stop DMA immediately and release the file."""
+        if self._audio is not None:
+            try:
+                self._audio.stop()
+            except Exception:
+                pass
+        self._close_file()
+
+    # -- public API -----------------------------------------------------------
+
+    def reinit(self):
+        """Full AudioOut teardown + rebuild — use sparingly (power-on only)."""
+        self._hard_stop()
+        if self._audio is not None:
+            try:
+                self._audio.deinit()
+            except Exception:
+                pass
+            self._audio = None
+        gc.collect()
+        self._create_audio_out()
+
+    def play(self, theme_index, name, loop=False):
+        """Play sounds/{theme_index}{name}.wav.  Returns True if playing."""
+        if self._audio is None:
+            return False
+
+        # Fastest possible transition: stop DMA → close old file → open new → play
+        self._hard_stop()
+
+        filename = "sounds/{}{}.wav".format(theme_index, name)
+        try:
+            self._wave_file = open(filename, "rb")
+            self._wav = audiocore.WaveFile(self._wave_file)
+        except OSError:
+            # Missing file is fine — device works without sounds
+            self._close_file()
+            return False
+        except Exception as e:
+            print("wav err:", e)
+            self._close_file()
+            return False
+
+        try:
+            self._audio.play(self._wav, loop=loop)
+            return True
+        except Exception as e:
+            print("play err:", e)
+            self._close_file()
+            return False
+
+    @property
+    def playing(self):
+        if self._audio is None:
+            return False
+        try:
+            return self._audio.playing
+        except Exception:
+            return False
+
+    def stop(self):
+        """Stop playback immediately."""
+        self._hard_stop()
+
+    def poll(self):
+        """Call once per frame.  Cleans up finished non-looping clips."""
+        if self._wave_file is not None and not self.playing:
+            self._close_file()
+
+    def mute(self):
+        if self._speaker_enable:
+            self._speaker_enable.value = False
+
+    def unmute(self):
+        if self._speaker_enable:
+            self._speaker_enable.value = True
+
+    def set_volume(self, pct):
+        self.volume = max(UserConfig.MIN_VOLUME, min(pct, UserConfig.MAX_VOLUME))
         return self.volume
 
     def increase_volume(self):
@@ -565,1154 +582,955 @@ class AudioManager:
         self.volume_preset_index = (self.volume_preset_index + 1) % len(UserConfig.VOLUME_PRESETS)
         return self.set_volume(UserConfig.VOLUME_PRESETS[self.volume_preset_index])
 
-    def _load_and_process_wav(self, filename):
-        wave_file = None
-        try:
-            wave_file = open(filename, "rb")
-            wav = audiocore.WaveFile(wave_file)
-            return (wave_file, wav)
-        except OSError:
-            # Audio file not found - this is OK, device works without sounds
-            print("  (no audio: {})".format(filename))
-            if wave_file:
-                wave_file.close()
-            return (None, None)
-        except Exception as e:
-            print("  Audio error:", e)
-            if wave_file:
-                wave_file.close()
-            return (None, None)
-
-    def play_audio_clip(self, theme_index, name, loop=False):
-        """Play audio clip. Works even if file is missing."""
-        if not self.audio:
-            return False
-
-        # Stop any current playback and close file
-        self.audio.stop()
-        self._close_current_file()
-        gc.collect()
-
-        filename = "sounds/{}{}.wav".format(theme_index, name)
-        self.current_wave_file, self.current_wav = self._load_and_process_wav(filename)
-
-        if self.current_wav is None:
-            return False  # File not found - that's OK
-
-        try:
-            self.audio.play(self.current_wav, loop=loop)
-            return True
-        except Exception as e:
-            print("Audio play error:", e)
-            self._close_current_file()
-            return False
-
-    def stop_audio(self):
-        if self.audio and self.audio.playing:
-            self.audio.stop()
-
-    def check_audio_done(self):
-        if self.audio and not self.audio.playing and self.current_wave_file is not None:
-            self._close_current_file()
-
-    def start_fade_out(self, duration=None):
-        if duration is None:
-            duration = SaberConfig.FADE_OUT_DURATION
-        self.fade_start_time = time.monotonic()
-        self.fade_duration = duration
-        self.is_fading = True
-
-    def update_fade(self):
-        """Update fade - stops audio after duration (no real fade without mixer)."""
-        if not self.is_fading:
-            return False
-
-        elapsed = time.monotonic() - self.fade_start_time
-        if elapsed >= self.fade_duration:
-            self.stop_audio()
-            self._close_current_file()
-            self.is_fading = False
-            return True
-        return False
-
-    def mute(self):
-        """Temporarily mute audio (for display operations)."""
-        if self.speaker_enable:
-            self.speaker_enable.value = False
-
-    def unmute(self):
-        """Restore audio after mute."""
-        if self.speaker_enable:
-            self.speaker_enable.value = True
-
-    def reinit(self):
-        """Reinitialize AudioOut for clean state (fixes playback issues)."""
-        self.stop_audio()
-        self._close_current_file()
-        if self.audio:
+    def cleanup(self):
+        self._hard_stop()
+        if self._audio is not None:
             try:
-                self.audio.deinit()
+                self._audio.deinit()
             except Exception:
                 pass
-        try:
-            self.audio = audioio.AudioOut(board.SPEAKER)
-        except Exception as e:
-            print("Audio reinit error:", e)
-            self.audio = None
-
-    def cleanup(self):
-        self.stop_audio()
-        self._close_current_file()
-        if self.audio:
-            self.audio.stop()
+            self._audio = None
 
 
 # =============================================================================
 # DISPLAY MANAGER
 # =============================================================================
 
-class SaberDisplay:
-    """Manage TFT display with LRU image caching."""
+class Display:
+    """TFT display with LRU image cache and non-blocking timeout."""
 
-    def __init__(self, battery_voltage_ref, audio_manager=None):
-        self.main_group = displayio.Group()
-        self.audio_manager = audio_manager  # For muting during display ops
+    def __init__(self, battery_func, audio):
+        self._group = displayio.Group()
+        self._audio = audio
+        self._get_battery = battery_func
+        self._cache = {}
+        self._cache_order = []
+        self._active = False
+        self._start = 0
+        self._timeout = UserConfig.DISPLAY_TIMEOUT
 
         try:
             board.DISPLAY.auto_refresh = True
-            board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
-        except Exception as e:
-            print("Display init error:", e)
+            board.DISPLAY.brightness = 0
+        except Exception:
+            pass
 
-        # LRU cache: keeps recent images in memory for fast access
-        self.image_cache = {}
-        self.image_cache_order = []
+    # -- helpers --------------------------------------------------------------
 
-        self.display_start_time = 0
-        self.display_active = False
-        self.display_timeout = SaberConfig.DISPLAY_TIMEOUT
-        self.get_battery_voltage_pct = battery_voltage_ref
-        self.image_display_duration = SaberConfig.IMAGE_DISPLAY_DURATION
-
-        self.turn_off_screen()
-
-    def turn_off_screen(self):
+    def _off(self):
         try:
             board.DISPLAY.brightness = 0
-        except Exception as e:
-            print("Error turning off screen:", e)
+        except Exception:
+            pass
 
-    def _show_status_with_bar(self, title, value, color, bar_width=None):
-        """Helper: Show status text with optional progress bar.
+    def _clear_group(self):
+        while len(self._group):
+            self._group.pop()
 
-        Args:
-            title: Label text (e.g., "VOLUME: 70%")
-            value: Numeric value for bar width (0-100), or None to skip bar
-            color: Hex color for text and bar (e.g., 0x00FF00 for green)
-            bar_width: Override bar width (default: use value directly)
-        """
+    def _show_bar(self, title, value, color, bar_w=None):
         try:
-            # Clear previous display content
-            while len(self.main_group):
-                self.main_group.pop()
-
-            # Add text label
-            text_label = label.Label(
-                terminalio.FONT, text=title, scale=2, color=color, x=10, y=30)
-            self.main_group.append(text_label)
-
-            # Add progress bar if value provided
+            self._clear_group()
+            self._group.append(
+                label.Label(terminalio.FONT, text=title, scale=2, color=color, x=10, y=30))
             if value is not None:
-                width = bar_width if bar_width is not None else max(1, min(value, 100))
-                bar_group = displayio.Group()
-
-                # Gray background bar
-                bg_palette = displayio.Palette(1)
-                bg_palette[0] = 0x444444
-                bg_bitmap = displayio.Bitmap(100, 14, 1)
-                bg_bitmap.fill(0)
-                bar_group.append(displayio.TileGrid(bg_bitmap, pixel_shader=bg_palette, x=14, y=46))
-
-                # Colored fill bar
-                fill_palette = displayio.Palette(1)
-                fill_palette[0] = color
-                fill_bitmap = displayio.Bitmap(width, 10, 1)
-                fill_bitmap.fill(0)
-                bar_group.append(displayio.TileGrid(fill_bitmap, pixel_shader=fill_palette, x=16, y=48))
-
-                self.main_group.append(bar_group)
-
-            # Show on display
-            board.DISPLAY.root_group = self.main_group
+                w = bar_w if bar_w is not None else max(1, min(value, 100))
+                grp = displayio.Group()
+                bg_pal = displayio.Palette(1)
+                bg_pal[0] = 0x444444
+                bg_bmp = displayio.Bitmap(100, 14, 1)
+                bg_bmp.fill(0)
+                grp.append(displayio.TileGrid(bg_bmp, pixel_shader=bg_pal, x=14, y=46))
+                fg_pal = displayio.Palette(1)
+                fg_pal[0] = color
+                fg_bmp = displayio.Bitmap(w, 10, 1)
+                fg_bmp.fill(0)
+                grp.append(displayio.TileGrid(fg_bmp, pixel_shader=fg_pal, x=16, y=48))
+                self._group.append(grp)
+            board.DISPLAY.root_group = self._group
             board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
-            self.display_start_time = time.monotonic()
-            self.display_active = True
+            self._start = time.monotonic()
+            self._timeout = UserConfig.DISPLAY_TIMEOUT
+            self._active = True
         except Exception as e:
-            print("Error showing status:", e)
+            print("disp err:", e)
 
-    def show_battery_status(self):
-        """Show battery percentage with progress bar."""
-        battery = self.get_battery_voltage_pct()
-        if battery == "USB":
-            self._show_status_with_bar("BATTERY: USB", None, 0xFFFFFF)
+    # -- public ---------------------------------------------------------------
+
+    def show_battery(self):
+        b = self._get_battery()
+        if b == "USB":
+            self._show_bar("BATTERY: USB", None, 0xFFFFFF)
         else:
-            self._show_status_with_bar("BATTERY: {}%".format(battery), battery, 0xFFFF00)
+            self._show_bar("BATTERY: {}%".format(b), b, 0xFFFF00)
 
-    def show_volume_status(self, volume_percent):
-        """Show volume with progress bar."""
-        self._show_status_with_bar("VOLUME: {}%".format(volume_percent), volume_percent, 0x00FF00)
+    def show_volume(self, vol):
+        self._show_bar("VOLUME: {}%".format(vol), vol, 0x00FF00)
 
-    def show_brightness_status(self, brightness_percent):
-        """Show brightness with progress bar (scaled for 15-35% range)."""
-        # Scale brightness to fill bar (15% -> ~38, 35% -> ~88)
-        bar_width = max(1, min(int(brightness_percent * 2.5), 100))
-        self._show_status_with_bar("BRIGHT: {}%".format(brightness_percent), brightness_percent, 0xFFFF00, bar_width)
+    def show_brightness(self, pct):
+        bar_w = max(1, min(int(pct * 2.5), 100))
+        self._show_bar("BRIGHT: {}%".format(pct), pct, 0xFFFF00, bar_w)
 
-    def _evict_oldest_image(self):
-        """Remove oldest image from cache (LRU eviction)."""
-        if not self.image_cache_order:
-            return
-        oldest_key = self.image_cache_order.pop(0)
-        if oldest_key in self.image_cache:
-            try:
-                del self.image_cache[oldest_key]
-            except Exception:
-                pass
-        gc.collect()
-
-    def _load_image(self, theme_index, image_type="logo"):
-        """Load image with LRU caching."""
-        cache_key = "{}{}".format(theme_index, image_type)
-
-        if cache_key in self.image_cache:
-            self.image_cache_order.remove(cache_key)
-            self.image_cache_order.append(cache_key)
-            return self.image_cache[cache_key]
-
-        filename = "/images/{}{}.bmp".format(theme_index, image_type)
+    def _load_image(self, theme_index, kind="logo"):
+        key = "{}{}".format(theme_index, kind)
+        if key in self._cache:
+            self._cache_order.remove(key)
+            self._cache_order.append(key)
+            return self._cache[key]
+        fname = "/images/{}{}.bmp".format(theme_index, kind)
         try:
-            if len(self.image_cache) >= UserConfig.MAX_IMAGE_CACHE_SIZE:
-                self._evict_oldest_image()
-
-            bitmap = displayio.OnDiskBitmap(filename)
-            tile_grid = displayio.TileGrid(bitmap, pixel_shader=bitmap.pixel_shader)
-            self.image_cache[cache_key] = tile_grid
-            self.image_cache_order.append(cache_key)
-            return tile_grid
+            if len(self._cache) >= UserConfig.MAX_IMAGE_CACHE_SIZE:
+                oldest = self._cache_order.pop(0)
+                self._cache.pop(oldest, None)
+                gc.collect()
+            bmp = displayio.OnDiskBitmap(fname)
+            tg = displayio.TileGrid(bmp, pixel_shader=bmp.pixel_shader)
+            self._cache[key] = tg
+            self._cache_order.append(key)
+            return tg
         except OSError:
-            # Image file not found - this is OK, device works without images
-            print("(no image: {})".format(filename))
             return None
         except Exception as e:
-            print("Image error {}: {}".format(filename, e))
+            print("img err:", e)
             return None
 
-    def show_image(self, theme_index, image_type="logo", duration=None):
-        """Display theme image (blocking, mutes audio to reduce display whine)."""
+    def show_image_blocking(self, theme_index, kind="logo", duration=None):
+        """Show image with speaker muted (for theme switch while off)."""
         if duration is None:
-            duration = self.image_display_duration
-
-        # Mute speaker during display refresh to reduce electrical noise
-        if self.audio_manager:
-            self.audio_manager.mute()
-
+            duration = HWConfig.IMAGE_DISPLAY_DURATION
+        if self._audio:
+            self._audio.mute()
         try:
-            while len(self.main_group):
-                self.main_group.pop()
-
-            image = self._load_image(theme_index, image_type)
-            if image:
-                self.main_group.append(image)
-                board.DISPLAY.root_group = self.main_group
+            self._clear_group()
+            img = self._load_image(theme_index, kind)
+            if img:
+                self._group.append(img)
+                board.DISPLAY.root_group = self._group
                 board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
                 board.DISPLAY.refresh()
                 time.sleep(duration)
-                while len(self.main_group):
-                    self.main_group.pop()
-                board.DISPLAY.root_group = self.main_group
+                self._clear_group()
+                board.DISPLAY.root_group = self._group
                 board.DISPLAY.brightness = 0
-
-            self.display_start_time = time.monotonic()
-            self.display_active = True
+            self._start = time.monotonic()
+            self._active = True
         except Exception as e:
-            print("Error showing image:", e)
+            print("img show err:", e)
         finally:
-            if self.audio_manager:
-                self.audio_manager.unmute()
+            if self._audio:
+                self._audio.unmute()
 
-    def show_image_async(self, theme_index, image_type="logo", duration=None):
-        """Display theme image non-blocking (for use with simultaneous audio)."""
+    def show_image_async(self, theme_index, kind="logo", duration=None):
+        """Show image without blocking — auto-clears via poll()."""
         if duration is None:
-            duration = self.image_display_duration
-
+            duration = HWConfig.IMAGE_DISPLAY_DURATION
         try:
-            while len(self.main_group):
-                self.main_group.pop()
-
-            image = self._load_image(theme_index, image_type)
-            if image:
-                self.main_group.append(image)
-                board.DISPLAY.root_group = self.main_group
+            self._clear_group()
+            img = self._load_image(theme_index, kind)
+            if img:
+                self._group.append(img)
+                board.DISPLAY.root_group = self._group
                 board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
                 board.DISPLAY.refresh()
-
-            # Set timeout for auto-off (handled by update_display)
-            self.display_start_time = time.monotonic()
-            self.display_timeout = duration
-            self.display_active = True
+            self._start = time.monotonic()
+            self._timeout = duration
+            self._active = True
         except Exception as e:
-            print("Error showing image:", e)
+            print("img async err:", e)
 
-    def update_display(self):
-        """Handle display timeout (clears image group and turns off screen)."""
-        if self.display_active:
-            if time.monotonic() - self.display_start_time > self.display_timeout:
-                # Clear the display group before turning off
-                try:
-                    while len(self.main_group):
-                        self.main_group.pop()
-                    board.DISPLAY.root_group = self.main_group
-                except Exception:
-                    pass
-                self.turn_off_screen()
-                self.display_active = False
-
-    def clear_cache(self):
-        self.image_cache.clear()
-        self.image_cache_order.clear()
-        gc.collect()
+    def poll(self):
+        """Call once per frame — handles display timeout."""
+        if self._active and time.monotonic() - self._start > self._timeout:
+            self._clear_group()
+            try:
+                board.DISPLAY.root_group = self._group
+            except Exception:
+                pass
+            self._off()
+            self._active = False
 
     def cleanup(self):
-        self.clear_cache()
-        self.turn_off_screen()
+        self._cache.clear()
+        self._cache_order.clear()
+        self._off()
 
 
 # =============================================================================
-# MAIN CONTROLLER
+# INPUT MANAGER (non-blocking)
+# =============================================================================
+#
+# Every touch pad is polled once per frame.  Press/release edges and timing
+# are tracked in a tiny state struct.  The main controller asks "did a tap
+# happen?" or "did a long-press fire?" — never blocks.
+
+class InputManager:
+    """Non-blocking capacitive touch input with tap and long-press detection."""
+
+    def __init__(self, hw):
+        self._hw = hw
+        self._state = {}
+        for name in ("left", "right", "a3", "a4"):
+            self._state[name] = {
+                "start": 0,
+                "is_long": False,
+                "long_fired": False,
+                "tap_ready": False,
+            }
+
+    def _pad(self, name):
+        if name == "left":
+            return self._hw.touch_left
+        if name == "right":
+            return self._hw.touch_right
+        if name == "a3":
+            return self._hw.touch_a3
+        if name == "a4":
+            return self._hw.touch_a4
+        return None
+
+    def poll(self):
+        """Read all pads once per frame and update edge state."""
+        now = time.monotonic()
+        for name in ("left", "right", "a3", "a4"):
+            pad = self._pad(name)
+            if pad is None:
+                continue
+            st = self._state[name]
+            try:
+                pressed = pad.value
+            except Exception:
+                continue
+
+            if pressed:
+                if st["start"] == 0:
+                    # rising edge
+                    st["start"] = now
+                    st["is_long"] = False
+                    st["long_fired"] = False
+                    st["tap_ready"] = False
+                elif not st["is_long"] and now - st["start"] >= UserConfig.LONG_PRESS_TIME:
+                    st["is_long"] = True
+            else:
+                # released
+                if st["start"] > 0 and not st["is_long"]:
+                    st["tap_ready"] = True
+                st["start"] = 0
+                st["is_long"] = False
+                st["long_fired"] = False
+
+    def tap(self, name):
+        """Returns True once when a short press is released (tap)."""
+        st = self._state.get(name)
+        if st and st["tap_ready"]:
+            st["tap_ready"] = False
+            return True
+        return False
+
+    def long_press(self, name):
+        """Returns True once when long-press threshold is reached."""
+        st = self._state.get(name)
+        if st and st["is_long"] and not st["long_fired"]:
+            st["long_fired"] = True
+            return True
+        return False
+
+    def is_pressed(self, name):
+        st = self._state.get(name)
+        return st is not None and st["start"] > 0
+
+
+# =============================================================================
+# MOTION ENGINE
+# =============================================================================
+#
+# Reads the accelerometer at a fixed interval and computes the delta
+# (change in acceleration) magnitude squared.  Delta-based detection
+# naturally ignores gravity.
+
+class MotionEngine:
+    """Accelerometer with delta-based swing/hit detection."""
+
+    def __init__(self, hw):
+        self._hw = hw
+        self._prev = (0.0, 0.0, 0.0)
+        self._error_count = 0
+        self._enabled = hw.accel is not None
+        self._disabled_time = 0
+        self._last_recovery = 0
+        self._last_sample = 0
+        self._last_diag = 0
+        self.last_delta_sq = 0.0
+
+    def poll(self, now):
+        """Sample accelerometer if interval elapsed.  Returns (delta_sq, raw) or None."""
+        if not self._enabled:
+            return None
+        if now - self._last_sample < ACCEL_SAMPLE_INTERVAL:
+            return None
+        self._last_sample = now
+        if self._hw.accel is None:
+            return None
+        try:
+            ax, ay, az = self._hw.accel.acceleration
+            dx = ax - self._prev[0]
+            dy = ay - self._prev[1]
+            dz = az - self._prev[2]
+            self._prev = (ax, ay, az)
+            self._error_count = 0
+            dsq = dx * dx + dy * dy + dz * dz
+            self.last_delta_sq = dsq
+            return (dsq, ax, ay, az)
+        except Exception as e:
+            self._error_count += 1
+            if self._error_count >= UserConfig.MAX_ACCEL_ERRORS:
+                print("accel disabled ({} errs)".format(self._error_count))
+                self._enabled = False
+                self._disabled_time = now
+            elif self._error_count % 5 == 0:
+                print("accel err {}: {}".format(self._error_count, e))
+            return None
+
+    def try_recover(self, now):
+        """Attempt recovery if disabled.  Call from maintenance path."""
+        if self._enabled:
+            return
+        if now - self._last_recovery < UserConfig.ACCEL_RECOVERY_INTERVAL:
+            return
+        self._last_recovery = now
+        print("accel recovery...")
+        if self._hw.reinit_accel():
+            self._enabled = True
+            self._error_count = 0
+            self._prev = (0.0, 0.0, 0.0)
+            print("accel recovered")
+
+    def print_diag(self, now):
+        if not UserConfig.ENABLE_DIAGNOSTICS:
+            return
+        if now - self._last_diag < UserConfig.ACCEL_OUTPUT_INTERVAL:
+            return
+        self._last_diag = now
+        print("delta: {:.1f} (swing>{} hit>{})".format(
+            self.last_delta_sq, UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
+
+
+# =============================================================================
+# LED ENGINE
+# =============================================================================
+#
+# All LED writes are rate-limited to prevent audio DMA starvation.
+# strip.show() for 55 RGBW pixels takes ~3.5 ms; we never call it more
+# than once per frame.
+
+class LEDEngine:
+    """Frame-rate-limited LED strip + onboard pixel control."""
+
+    def __init__(self, hw):
+        self._hw = hw
+        self._last_strip_update = 0
+        self._last_strip_color = None
+        self._strip_dirty = False
+
+    # -- color helpers --------------------------------------------------------
+
+    @staticmethod
+    def mix(c1, c2, t):
+        """Linearly interpolate two RGBW tuples.  t=0 → c1, t=1 → c2."""
+        t = max(0.0, min(t, 1.0))
+        s = 1.0 - t
+        return (
+            int(c1[0] * s + c2[0] * t),
+            int(c1[1] * s + c2[1] * t),
+            int(c1[2] * s + c2[2] * t),
+            int(c1[3] * s + c2[3] * t),
+        )
+
+    @staticmethod
+    def dim(color, factor):
+        """Scale an RGBW color by factor (0-1)."""
+        return tuple(int(c * factor) for c in color)
+
+    # -- strip ----------------------------------------------------------------
+
+    def strip_fill(self, color, now):
+        """Fill strip with a solid color, respecting rate limit."""
+        if not self._hw.strip:
+            return
+        if color == self._last_strip_color:
+            return  # no change
+        if now - self._last_strip_update < LED_MIN_INTERVAL:
+            self._strip_dirty = True
+            return  # too soon — will catch on next frame
+        try:
+            self._hw.strip.fill(color)
+            self._hw.strip.show()
+            self._last_strip_color = color
+            self._last_strip_update = now
+            self._strip_dirty = False
+        except Exception as e:
+            print("strip err:", e)
+
+    def strip_fill_force(self, color):
+        """Bypass rate limit (for power animation frames and final states)."""
+        if not self._hw.strip:
+            return
+        try:
+            self._hw.strip.fill(color)
+            self._hw.strip.show()
+            self._last_strip_color = color
+            self._last_strip_update = time.monotonic()
+            self._strip_dirty = False
+        except Exception as e:
+            print("strip err:", e)
+
+    def strip_progressive(self, threshold, color, reverse=False):
+        """Fill strip progressively (for power on/off animation)."""
+        if not self._hw.strip:
+            return
+        try:
+            n = HWConfig.NUM_PIXELS
+            if not reverse:
+                for i in range(n):
+                    self._hw.strip[i] = color if i <= threshold else 0
+            else:
+                cutoff = n - threshold
+                for i in range(n):
+                    self._hw.strip[i] = color if i < cutoff else 0
+            self._hw.strip.show()
+            self._last_strip_update = time.monotonic()
+            self._last_strip_color = None  # mixed state
+            self._strip_dirty = False
+        except Exception as e:
+            print("strip prog err:", e)
+
+    def set_brightness(self, value):
+        if self._hw.strip:
+            try:
+                if self._hw.strip.brightness != value:
+                    self._hw.strip.brightness = value
+            except Exception:
+                pass
+
+    def flush_if_dirty(self, now):
+        """If a rate-limited write was skipped, flush the pending color."""
+        if self._strip_dirty and self._last_strip_color is not None:
+            if now - self._last_strip_update >= LED_MIN_INTERVAL:
+                self.strip_fill_force(self._last_strip_color)
+
+    # -- onboard pixels -------------------------------------------------------
+
+    def onboard_off(self):
+        if self._hw.onboard:
+            try:
+                self._hw.onboard.fill(0)
+                self._hw.onboard.show()
+            except Exception:
+                pass
+
+    def onboard_breathe(self, color_idle, now):
+        """Gentle sine-wave pulse in idle color."""
+        if not self._hw.onboard:
+            return
+        try:
+            pulse = 0.65 + 0.35 * math.sin(now * math.pi)
+            r = int(color_idle[0] * pulse)
+            g = int(color_idle[1] * pulse)
+            b = int(color_idle[2] * pulse)
+            self._hw.onboard.fill((r, g, b))
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_spin(self, color, now, speed=12):
+        """Spinning chase with dim trail."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            pos = int(now * speed) % n
+            c3 = color[:3]
+            for i in range(n):
+                if i == pos:
+                    self._hw.onboard[i] = c3
+                else:
+                    dist = (pos - i) % n
+                    fade = max(0, 1.0 - dist * 0.4)
+                    self._hw.onboard[i] = (
+                        int(color[0] * fade * 0.3),
+                        int(color[1] * fade * 0.3),
+                        int(color[2] * fade * 0.3),
+                    )
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_flash(self, color_hit, color_idle, elapsed):
+        """White flash then fade to idle."""
+        if not self._hw.onboard:
+            return
+        try:
+            if elapsed < 0.1:
+                self._hw.onboard.fill((255, 255, 255))
+            else:
+                t = min((elapsed - 0.1) * 2, 1.0)
+                r = int(color_hit[0] * (1 - t) + color_idle[0] * t)
+                g = int(color_hit[1] * (1 - t) + color_idle[1] * t)
+                b = int(color_hit[2] * (1 - t) + color_idle[2] * t)
+                self._hw.onboard.fill((r, g, b))
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+    def onboard_spinner(self, color, now):
+        """Fast spinner for power transitions."""
+        if not self._hw.onboard:
+            return
+        try:
+            n = HWConfig.ONBOARD_PIXELS
+            pos = int(now * 8) % n
+            for i in range(n):
+                self._hw.onboard[i] = color[:3] if i == pos else (0, 0, 0)
+            self._hw.onboard.show()
+        except Exception:
+            pass
+
+
+# =============================================================================
+# SABER CONTROLLER
 # =============================================================================
 
 class SaberController:
     """
-    Main controller coordinating hardware, audio, and display.
-    State Machine: OFF -> TRANSITION -> IDLE <-> SWING/HIT
+    Top-level coordinator.
+
+    Main loop cadence (per frame, ~20 ms target):
+      1. Feed watchdog                   (< 0.01 ms)
+      2. Poll audio engine               (< 0.01 ms)
+      3. Poll inputs                     (< 0.5 ms)
+      4. Handle input actions            (varies)
+      5. Poll accelerometer              (< 1 ms)
+      6. Process state logic             (< 0.5 ms)
+      7. Update LEDs (strip + onboard)   (< 4 ms)
+      8. Poll display timeout            (< 0.01 ms)
+      9. Periodic maintenance (GC/batt)  (< 1 ms, occasionally 10 ms for batt)
+     10. Sleep remainder of frame        (adaptive)
     """
 
     def __init__(self):
-        print("Booting SaberController...")
+        print("\n=== SwingSaber v2.0 ===")
+        self.hw = Hardware()
+        self.audio = AudioEngine(self.hw.speaker_enable)
+        self.display = Display(self.hw.read_battery_pct, self.audio)
+        self.input = InputManager(self.hw)
+        self.motion = MotionEngine(self.hw)
+        self.led = LEDEngine(self.hw)
 
-        self.hw = SaberHardware()
-        self.audio = AudioManager(speaker_enable=self.hw.speaker_enable)
-        self.display = SaberDisplay(self._get_battery_percentage, audio_manager=self.audio)
+        # State
+        self.state = STATE_OFF
+        self._state_start = time.monotonic()
 
-        self.mode = SaberConfig.STATE_OFF
-
-        # Load persistent settings
+        # Theme / settings
         self.theme_index = PersistentSettings.load_theme()
-        saved_volume = PersistentSettings.load_volume()
-        self.audio.set_volume(saved_volume)
-        self.brightness_preset_index = PersistentSettings.load_brightness()
-        self.current_brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_preset_index]
-        print("  Loaded: theme={}, volume={}%, brightness={}%".format(
-            self.theme_index, saved_volume, int(self.current_brightness * 100)))
+        self.audio.set_volume(PersistentSettings.load_volume())
+        self.brightness_index = PersistentSettings.load_brightness()
+        self.brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_index]
 
-        # Color state (RGBW format)
+        # Derived colors
+        self.color_full = (0, 0, 0, 0)
         self.color_idle = (0, 0, 0, 0)
-        self.color_swing = (0, 0, 0, 0)
         self.color_hit = (0, 0, 0, 0)
-        self.color_active = (0, 0, 0, 0)
-        self.last_color = None
+        self._apply_theme()
 
         # Timing
-        self.event_start_time = 0
-        self.last_gc_time = time.monotonic()
-        self.last_battery_check = 0
-        self.last_battery_warning = 0
-        self.last_accel_recovery_attempt = 0
-        self.last_led_update = 0  # LED frame rate limiter
+        self._last_gc = time.monotonic()
+        self._last_battery_check = 0
+        self._last_battery_warning = 0
 
-        # Touch button state tracking (for debouncing and long-press detection)
-        # Tap = detected on RELEASE after short press; Long press = detected while held
-        def new_touch_state():
-            return {
-                'press_start': 0,        # When current press started (0 = not pressed)
-                'is_long_press': False,  # Has this press exceeded long press threshold?
-                'long_press_fired': False # Have we already handled the long press?
-            }
-        self.touch_state = {
-            'left': new_touch_state(), 'right': new_touch_state(),
-            'a3': new_touch_state(), 'a4': new_touch_state()
-        }
-
-        # Error tracking
-        self.accel_error_count = 0
-        self.accel_enabled = True
-        self.accel_disabled_time = 0
-
-        # Delta-based motion detection (previous acceleration for change detection)
-        self.prev_accel = (0.0, 0.0, 0.0)
+        # Power animation state (non-blocking)
+        self._power_anim_start = 0
 
         # Diagnostics
-        self.loop_count = 0
-        self.state_changes = 0
-        self.last_accel_output = 0
+        self._loop_count = 0
 
-        # Watchdog
-        self.watchdog = None
-        self._init_watchdog()
+        self.display._off()
+        print("theme={} vol={}% bright={}%".format(
+            self.theme_index, self.audio.volume, int(self.brightness * 100)))
+        print()
 
-        self._update_theme_colors()
-        self.display.turn_off_screen()
-        print("SaberController init complete.\n")
+    # -- theme ----------------------------------------------------------------
 
-    def _init_watchdog(self):
-        """Initialize watchdog timer for crash recovery."""
-        if not UserConfig.ENABLE_WATCHDOG or not WATCHDOG_AVAILABLE:
-            return
-        try:
-            self.watchdog = microcontroller.watchdog
-            self.watchdog.timeout = UserConfig.WATCHDOG_TIMEOUT
-            self.watchdog.mode = WatchDogMode.RESET
-            print("  Watchdog enabled ({}s)".format(UserConfig.WATCHDOG_TIMEOUT))
-        except Exception as e:
-            print("  Watchdog init failed:", e)
-            self.watchdog = None
+    def _apply_theme(self):
+        t = UserConfig.THEMES[self.theme_index]
+        self.color_full = t["color"]
+        self.color_idle = tuple(c // HWConfig.IDLE_COLOR_DIVISOR for c in t["color"])
+        self.color_hit = t["hit_color"]
 
-    def _feed_watchdog(self):
-        """Feed watchdog to prevent reset."""
-        if self.watchdog is not None:
-            try:
-                self.watchdog.feed()
-            except Exception:
-                pass
-
-    def _get_battery_percentage(self):
-        """Get battery percentage (returns "USB" if plugged in)."""
-        if supervisor.runtime.usb_connected:
-            return "USB"
-        if not self.hw.battery_voltage:
-            return 0
-
-        try:
-            sum_val = 0
-            for _ in range(SaberConfig.BATTERY_VOLTAGE_SAMPLES):
-                sum_val += self.hw.battery_voltage.value
-                time.sleep(0.001)
-
-            avg_val = sum_val / SaberConfig.BATTERY_VOLTAGE_SAMPLES
-            voltage = (avg_val / SaberConfig.BATTERY_ADC_MAX) * \
-                      self.hw.battery_voltage.reference_voltage * \
-                      SaberConfig.BATTERY_VOLTAGE_DIVIDER
-
-            percent = ((voltage - SaberConfig.BATTERY_MIN_VOLTAGE) /
-                      (SaberConfig.BATTERY_MAX_VOLTAGE - SaberConfig.BATTERY_MIN_VOLTAGE)) * 100
-            return min(max(int(percent), 0), 100)
-        except Exception as e:
-            print("Battery read error:", e)
-            return 0
-
-    def _update_theme_colors(self):
-        """Update RGBW colors from current theme."""
-        theme = UserConfig.THEMES[self.theme_index]
-        # Dim all 4 RGBW channels for idle color
-        self.color_idle = tuple(int(c / SaberConfig.IDLE_COLOR_DIVISOR) for c in theme["color"])
-        self.color_swing = theme["color"]
-        self.color_hit = theme["hit_color"]
-
-    def cycle_theme(self):
+    def _cycle_theme(self):
         self.theme_index = (self.theme_index + 1) % len(UserConfig.THEMES)
-        self._update_theme_colors()
+        self._apply_theme()
+        PersistentSettings.save_theme(self.theme_index)
 
-    def cycle_brightness_preset(self):
-        """Cycle through brightness presets and apply."""
-        self.brightness_preset_index = (self.brightness_preset_index + 1) % len(UserConfig.BRIGHTNESS_PRESETS)
-        self.current_brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_preset_index]
+    def _cycle_brightness(self):
+        self.brightness_index = (self.brightness_index + 1) % len(UserConfig.BRIGHTNESS_PRESETS)
+        self.brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_index]
+        PersistentSettings.save_brightness(self.brightness_index)
         if self.hw.strip:
-            self.hw.strip.brightness = self.current_brightness
+            self.hw.strip.brightness = self.brightness
             self.hw.strip.show()
-        print("Brightness: {}%".format(int(self.current_brightness * 100)))
-        return int(self.current_brightness * 100)
+        return int(self.brightness * 100)
 
-    def _transition_to_state(self, new_state):
-        """Validate and execute state transition."""
-        if new_state == self.mode:
+    # -- state transitions ----------------------------------------------------
+
+    def _change_state(self, new_state):
+        """Single point of state change with validation."""
+        if new_state == self.state:
             return True
-
-        valid_next_states = SaberConfig.VALID_TRANSITIONS.get(self.mode, [])
-        if new_state not in valid_next_states:
-            old_name = SaberConfig.STATE_NAMES.get(self.mode, str(self.mode))
-            new_name = SaberConfig.STATE_NAMES.get(new_state, str(new_state))
-            print("INVALID: {} -> {}".format(old_name, new_name))
+        allowed = _VALID_TRANSITIONS.get(self.state, set())
+        if new_state not in allowed:
+            print("BAD: {}->{}".format(
+                _STATE_NAMES.get(self.state, "?"), _STATE_NAMES.get(new_state, "?")))
             return False
-
-        old_state = self.mode
-        self.mode = new_state
-        self.state_changes += 1
-        # Always show state transitions (except to/from TRANSITION state for cleaner output)
-        if old_state != SaberConfig.STATE_TRANSITION and new_state != SaberConfig.STATE_TRANSITION:
-            old_name = SaberConfig.STATE_NAMES.get(old_state, str(old_state))
-            new_name = SaberConfig.STATE_NAMES.get(new_state, str(new_state))
-            print("[{}->{}]".format(old_name, new_name))
+        old = self.state
+        self.state = new_state
+        self._state_start = time.monotonic()
+        # Log meaningful transitions
+        if old not in (STATE_POWER_ON, STATE_POWER_OFF) and new_state not in (STATE_POWER_ON, STATE_POWER_OFF):
+            print("[{}->{}]".format(_STATE_NAMES.get(old, "?"), _STATE_NAMES.get(new_state, "?")))
         return True
 
-    def _animate_power(self, name, duration, reverse):
-        """Animate blade ignition/retraction."""
-        if not self.hw.strip:
-            return
+    def _state_elapsed(self):
+        return time.monotonic() - self._state_start
 
-        # Use active brightness for animations (idle uses dimmer 5%)
-        self.hw.strip.brightness = self.current_brightness
+    # -- power animations (semi-blocking, but with watchdog feeds) ------------
+    #
+    # These are the ONLY place where we do a tight loop outside the main loop.
+    # They feed the watchdog and sleep LED_MIN_INTERVAL between frames to
+    # keep audio DMA happy.  Total duration: 1.15-1.7 s.
 
-        self.audio.stop_audio()
-        self.audio.play_audio_clip(self.theme_index, name, loop=False)
-        start_time = time.monotonic()
+    def _animate_power_on(self):
+        """Progressive blade ignition with audio."""
+        self.led.set_brightness(self.brightness)
+        self.audio.play(self.theme_index, "on", loop=False)
+        start = time.monotonic()
+        dur = HWConfig.POWER_ON_DURATION
+        n = HWConfig.NUM_PIXELS
 
         while True:
-            self._feed_watchdog()
-            elapsed = time.monotonic() - start_time
-            if elapsed > duration:
+            self.hw.feed_watchdog()
+            elapsed = time.monotonic() - start
+            if elapsed >= dur:
                 break
+            frac = math.sqrt(min(elapsed / dur, 1.0))
+            thresh = int(n * frac + 0.5)
+            self.led.strip_progressive(thresh, self.color_idle, reverse=False)
+            self.led.onboard_spinner(self.color_full, time.monotonic())
+            time.sleep(LED_MIN_INTERVAL)
 
-            fraction = math.sqrt(min(elapsed / duration, 1.0))
-            threshold = int(SaberConfig.NUM_PIXELS * fraction + 0.5)
+        # Final state: full idle color
+        self.led.strip_fill_force(self.color_idle)
 
-            try:
-                if not reverse:
-                    for i in range(SaberConfig.NUM_PIXELS):
-                        self.hw.strip[i] = self.color_idle if i <= threshold else 0
-                else:
-                    lit_end = SaberConfig.NUM_PIXELS - threshold
-                    for i in range(SaberConfig.NUM_PIXELS):
-                        self.hw.strip[i] = self.color_idle if i < lit_end else 0
-                self.hw.strip.show()
+        # Wait for power-on sound to finish (with watchdog)
+        while self.audio.playing:
+            self.hw.feed_watchdog()
+            time.sleep(0.03)
 
-                # Update onboard pixels with spinner effect (matches STATE_TRANSITION in main loop)
-                # This prevents timing issues from having inconsistent LED update patterns
-                if self.hw.onboard:
-                    now = time.monotonic()
-                    n = SaberConfig.ONBOARD_PIXELS
-                    pos = int(now * 8) % n
-                    for i in range(n):
-                        if i == pos:
-                            self.hw.onboard[i] = self.color_swing[:3]
-                        else:
-                            self.hw.onboard[i] = (0, 0, 0)
-                    self.hw.onboard.show()
+    def _animate_power_off(self):
+        """Progressive blade retraction with audio."""
+        self.audio.stop()
+        self.audio.play(self.theme_index, "off", loop=False)
+        start = time.monotonic()
+        dur = HWConfig.POWER_OFF_DURATION
+        n = HWConfig.NUM_PIXELS
 
-                # Use same rate limiting as swing/hit animations to prevent audio buffer underruns
-                time.sleep(UserConfig.LED_UPDATE_INTERVAL)
-            except Exception as e:
-                print("Strip animation error:", e)
+        while True:
+            self.hw.feed_watchdog()
+            elapsed = time.monotonic() - start
+            if elapsed >= dur:
                 break
+            frac = math.sqrt(min(elapsed / dur, 1.0))
+            thresh = int(n * frac + 0.5)
+            self.led.strip_progressive(thresh, self.color_idle, reverse=True)
+            self.led.onboard_spinner(self.color_full, time.monotonic())
+            time.sleep(LED_MIN_INTERVAL)
 
-        try:
-            self.hw.strip.fill(0 if reverse else self.color_idle)
-            self.hw.strip.show()
-        except Exception:
-            pass
+        # Final state: all dark
+        self.led.strip_fill_force(0)
+        self.led.onboard_off()
 
-        while self.audio.audio and self.audio.audio.playing:
-            self._feed_watchdog()
-            time.sleep(SaberConfig.AUDIO_STOP_CHECK_INTERVAL)
+        # Wait for power-off sound to finish
+        while self.audio.playing:
+            self.hw.feed_watchdog()
+            time.sleep(0.03)
 
-    def _get_touch_key(self, touch_input):
-        """Map touch input to state key."""
-        if touch_input == self.hw.touch_left:
-            return 'left'
-        elif touch_input == self.hw.touch_right:
-            return 'right'
-        elif touch_input == self.hw.touch_batt_a3:
-            return 'a3'
-        elif touch_input == self.hw.touch_batt_a4:
-            return 'a4'
-        return None
+    # -- input actions --------------------------------------------------------
 
-    def _check_touch_debounced(self, touch_input, touch_key=None):
-        """Check for TAP: returns True on RELEASE after a short press.
+    def _handle_inputs(self):
+        """Process all input events.  Returns True if an action consumed this frame."""
 
-        This allows long press to be detected first (while held). Tap only
-        fires when the button is released before the long press threshold.
-        """
-        if not touch_input:
-            return False
+        # -- A3/A4: battery tap, volume long-press ----------------------------
+        if self.input.long_press("a3"):
+            vol = self.audio.increase_volume()
+            PersistentSettings.save_volume(vol)
+            self.display.show_volume(vol)
+            return True
+        if self.input.long_press("a4"):
+            vol = self.audio.decrease_volume()
+            PersistentSettings.save_volume(vol)
+            self.display.show_volume(vol)
+            return True
+        if self.input.tap("a3") or self.input.tap("a4"):
+            self.display.show_battery()
+            return True
 
-        if touch_key is None:
-            touch_key = self._get_touch_key(touch_input)
-        if touch_key is None or touch_key not in self.touch_state:
-            return False
+        # -- LEFT: theme tap, volume-preset long-press ------------------------
+        if self.input.long_press("left"):
+            vol = self.audio.cycle_volume_preset()
+            PersistentSettings.save_volume(vol)
+            self.display.show_volume(vol)
+            return True
 
-        state = self.touch_state[touch_key]
-
-        try:
-            currently_pressed = touch_input.value
-
-            if currently_pressed:
-                # Button is pressed - update timing state
-                now = time.monotonic()
-                if state['press_start'] == 0:
-                    # New press starting
-                    state['press_start'] = now
-                    state['is_long_press'] = False
-                    state['long_press_fired'] = False
-                elif now - state['press_start'] >= UserConfig.LONG_PRESS_TIME:
-                    # Long press threshold reached (will be handled by _check_long_press)
-                    state['is_long_press'] = True
-                # Don't return True while pressed - wait for release
+        if self.input.tap("left"):
+            if self.state == STATE_OFF:
+                self._cycle_theme()
+                print("theme: {}".format(self.theme_index))
+                self.audio.play(self.theme_index, "switch")
+                self.display.show_image_async(self.theme_index, "logo")
             else:
-                # Button is released - check if it was a short press (tap)
-                if state['press_start'] > 0 and not state['is_long_press']:
-                    # Short press released = TAP
-                    state['press_start'] = 0
-                    return True
-                # Reset state after any release
-                state['press_start'] = 0
-                state['is_long_press'] = False
-                state['long_press_fired'] = False
-        except Exception as e:
-            print("Touch read error:", e)
+                # Theme switch while on: power off first
+                self._change_state(STATE_POWER_OFF)
+                self._animate_power_off()
+                self._change_state(STATE_OFF)
+                self._cycle_theme()
+                print("theme (on): {}".format(self.theme_index))
+                self.audio.play(self.theme_index, "switch")
+                self.display.show_image_async(self.theme_index, "logo")
+            return True
+
+        # -- RIGHT: power tap, brightness long-press --------------------------
+        if self.input.long_press("right"):
+            pct = self._cycle_brightness()
+            self.display.show_brightness(pct)
+            return True
+
+        if self.input.tap("right"):
+            if self.state == STATE_OFF:
+                print("POWER ON")
+                self.audio.reinit()
+                self._change_state(STATE_POWER_ON)
+                self._animate_power_on()
+                self.audio.play(self.theme_index, "idle", loop=True)
+                self._change_state(STATE_IDLE)
+            elif self.state in (STATE_IDLE, STATE_SWING, STATE_HIT):
+                print("POWER OFF")
+                self._change_state(STATE_POWER_OFF)
+                self._animate_power_off()
+                self._change_state(STATE_OFF)
+            return True
 
         return False
 
-    def _check_long_press(self, touch_input, touch_key=None):
-        """Check for LONG PRESS: returns True once when threshold reached while held.
+    # -- per-frame state updates ----------------------------------------------
 
-        Must be called before _check_touch_debounced in the same loop iteration
-        to ensure long press is detected before tap on release.
-        """
-        if not touch_input:
-            return False
-        if touch_key is None:
-            touch_key = self._get_touch_key(touch_input)
-        if touch_key is None or touch_key not in self.touch_state:
-            return False
+    def _update_state(self, now):
+        """Run state-specific logic once per frame."""
 
-        state = self.touch_state[touch_key]
+        if self.state == STATE_OFF:
+            # Nothing to do — low power idle
+            pass
 
+        elif self.state == STATE_IDLE:
+            # Set idle brightness
+            self.led.set_brightness(UserConfig.IDLE_BRIGHTNESS)
+            self.led.strip_fill(self.color_idle, now)
+            self.led.onboard_breathe(self.color_idle, now)
+
+            # Check for motion
+            sample = self.motion.poll(now)
+            if sample is not None:
+                dsq = sample[0]
+                self.motion.print_diag(now)
+
+                if dsq > UserConfig.HIT_THRESHOLD:
+                    print(">>> HIT: {:.1f}".format(dsq))
+                    # Immediate transition: stop idle hum, play hit, switch state
+                    self.audio.stop()
+                    self.audio.play(self.theme_index, "hit")
+                    self.led.set_brightness(self.brightness)
+                    self._change_state(STATE_HIT)
+
+                elif dsq > UserConfig.SWING_THRESHOLD:
+                    print(">> SWING: {:.1f}".format(dsq))
+                    self.audio.stop()
+                    self.audio.play(self.theme_index, "swing")
+                    self.led.set_brightness(self.brightness)
+                    self._change_state(STATE_SWING)
+
+        elif self.state == STATE_SWING:
+            elapsed = self._state_elapsed()
+            # Blend from swing color → idle color
+            t = min(elapsed * 2.0, 1.0)
+            color = self.led.mix(self.color_full, self.color_idle, t)
+            self.led.strip_fill(color, now)
+            self.led.onboard_spin(self.color_full, now - self._state_start)
+
+            # Done when audio finishes (or fallback duration)
+            if not self.audio.playing and elapsed >= HWConfig.SWING_DURATION_FALLBACK:
+                self.audio.play(self.theme_index, "idle", loop=True)
+                self.led.strip_fill_force(self.color_idle)
+                self._change_state(STATE_IDLE)
+            elif not self.audio.playing:
+                # Audio done but still in fallback window — keep blending
+                pass
+
+        elif self.state == STATE_HIT:
+            elapsed = self._state_elapsed()
+            # Blend from hit color → idle color
+            t = min(elapsed, 1.0)
+            color = self.led.mix(self.color_hit, self.color_idle, t)
+            self.led.strip_fill(color, now)
+            self.led.onboard_flash(self.color_hit, self.color_idle, elapsed)
+
+            # Done when audio finishes (or fallback duration)
+            if not self.audio.playing and elapsed >= HWConfig.HIT_DURATION_FALLBACK:
+                self.audio.play(self.theme_index, "idle", loop=True)
+                self.led.strip_fill_force(self.color_idle)
+                self._change_state(STATE_IDLE)
+
+    # -- maintenance ----------------------------------------------------------
+
+    def _maintenance(self, now):
+        """GC, battery check, accel recovery.  Runs every frame but most
+        checks exit immediately via time guards."""
+
+        # Critical memory — always check
         try:
-            if not touch_input.value:
-                return False  # Not pressed
-
-            now = time.monotonic()
-
-            # Start tracking if this is a new press
-            if state['press_start'] == 0:
-                state['press_start'] = now
-                state['is_long_press'] = False
-                state['long_press_fired'] = False
-                return False
-
-            # Check if long press threshold reached
-            if now - state['press_start'] >= UserConfig.LONG_PRESS_TIME:
-                state['is_long_press'] = True
-                if not state['long_press_fired']:
-                    state['long_press_fired'] = True
-                    return True  # Fire long press once
+            free = gc.mem_free()
+            if free < UserConfig.CRITICAL_MEMORY_THRESHOLD:
+                gc.collect()
+                if UserConfig.ENABLE_DIAGNOSTICS:
+                    print("CRIT GC: {}->{}".format(free, gc.mem_free()))
         except Exception:
             pass
-        return False
 
-    def _wait_for_touch_release(self, touch_input, touch_key=None):
-        """Wait for touch release (feeds watchdog during wait)."""
-        if not touch_input:
+        # Regular GC — only when not in an animation
+        if self.state in (STATE_OFF, STATE_IDLE):
+            if now - self._last_gc > UserConfig.GC_INTERVAL:
+                gc.collect()
+                self._last_gc = now
+                if UserConfig.ENABLE_DIAGNOSTICS:
+                    print("GC: {} free".format(gc.mem_free()))
+
+        # Battery
+        if now - self._last_battery_check > UserConfig.BATTERY_CHECK_INTERVAL:
+            batt = self.hw.read_battery_pct()
+            self._last_battery_check = now
+            if UserConfig.ENABLE_DIAGNOSTICS:
+                print("batt: {}".format(batt))
+            if batt != "USB" and isinstance(batt, int):
+                if batt <= UserConfig.BATTERY_CRITICAL_THRESHOLD:
+                    if now - self._last_battery_warning > UserConfig.BATTERY_WARNING_INTERVAL:
+                        self._battery_warning(critical=True)
+                        self._last_battery_warning = now
+                elif batt <= UserConfig.BATTERY_WARNING_THRESHOLD:
+                    if now - self._last_battery_warning > UserConfig.BATTERY_WARNING_INTERVAL:
+                        self._battery_warning(critical=False)
+                        self._last_battery_warning = now
+
+        # Accel recovery
+        self.motion.try_recover(now)
+
+    def _battery_warning(self, critical=False):
+        """Flash strip for battery warning (only when off)."""
+        if not self.hw.strip or self.state != STATE_OFF:
             return
-        if touch_key is None:
-            touch_key = self._get_touch_key(touch_input)
+        color = (255, 0, 0, 0) if critical else (255, 255, 0, 0)
+        flashes = 3 if critical else 2
+        label_text = "CRITICAL" if critical else "LOW"
+        print("BATT {}: low!".format(label_text))
         try:
-            while touch_input.value:
-                self._feed_watchdog()
-                time.sleep(UserConfig.TOUCH_DEBOUNCE_TIME)
-        except Exception:
-            pass
-        if touch_key and touch_key in self.touch_state:
-            self.touch_state[touch_key]['press_start'] = 0
-            self.touch_state[touch_key]['is_long_press'] = False
-            self.touch_state[touch_key]['long_press_fired'] = False
-
-    def _handle_battery_touch(self):
-        """A3/A4: Long press = volume, tap = battery status."""
-        if self._check_long_press(self.hw.touch_batt_a3, 'a3'):
-            new_vol = self.audio.increase_volume()
-            PersistentSettings.save_volume(new_vol)
-            self.display.show_volume_status(self.audio.volume)
-            self._wait_for_touch_release(self.hw.touch_batt_a3, 'a3')
-            return True
-
-        if self._check_long_press(self.hw.touch_batt_a4, 'a4'):
-            new_vol = self.audio.decrease_volume()
-            PersistentSettings.save_volume(new_vol)
-            self.display.show_volume_status(self.audio.volume)
-            self._wait_for_touch_release(self.hw.touch_batt_a4, 'a4')
-            return True
-
-        if self._check_touch_debounced(self.hw.touch_batt_a3, 'a3') or \
-           self._check_touch_debounced(self.hw.touch_batt_a4, 'a4'):
-            self.display.show_battery_status()
-            self._wait_for_touch_release(self.hw.touch_batt_a3, 'a3')
-            self._wait_for_touch_release(self.hw.touch_batt_a4, 'a4')
-            return True
-        return False
-
-    def _handle_theme_switch(self):
-        """LEFT: Long press = volume presets, tap = theme switch."""
-        if self._check_long_press(self.hw.touch_left, 'left'):
-            preset_vol = self.audio.cycle_volume_preset()
-            PersistentSettings.save_volume(preset_vol)
-            self.display.show_volume_status(preset_vol)
-            self._wait_for_touch_release(self.hw.touch_left, 'left')
-            return True
-
-        if not self._check_touch_debounced(self.hw.touch_left, 'left'):
-            return False
-
-        if self.mode == SaberConfig.STATE_OFF:
-            old_theme = self.theme_index
-            self.cycle_theme()
-            PersistentSettings.save_theme(self.theme_index)
-            print("Theme: {} -> {}".format(old_theme, self.theme_index))
-            # Play switch sound and show image simultaneously (non-blocking)
-            self.audio.play_audio_clip(self.theme_index, "switch")
-            self.display.show_image_async(self.theme_index, "logo")
-            self.event_start_time = time.monotonic()
-        else:
-            self.audio.start_fade_out()
-            while not self.audio.update_fade():
-                self._feed_watchdog()
-                time.sleep(0.01)
-
-            self._transition_to_state(SaberConfig.STATE_TRANSITION)
-            self._animate_power("off", duration=SaberConfig.POWER_OFF_DURATION, reverse=True)
-            self._transition_to_state(SaberConfig.STATE_OFF)
-
-            self.cycle_theme()
-            PersistentSettings.save_theme(self.theme_index)
-            print("Theme (while on): {}".format(self.theme_index))
-            # Play switch sound and show image simultaneously (non-blocking)
-            self.audio.play_audio_clip(self.theme_index, "switch")
-            self.display.show_image_async(self.theme_index, "logo")
-            self.event_start_time = time.monotonic()
-
-        self._wait_for_touch_release(self.hw.touch_left, 'left')
-        return True
-
-    def _handle_power_toggle(self):
-        """RIGHT: Long press = brightness presets, tap = power on/off."""
-        # Long press cycles brightness presets
-        if self._check_long_press(self.hw.touch_right, 'right'):
-            brightness_pct = self.cycle_brightness_preset()
-            PersistentSettings.save_brightness(self.brightness_preset_index)
-            self.display.show_brightness_status(brightness_pct)
-            self._wait_for_touch_release(self.hw.touch_right, 'right')
-            return True
-
-        if not self._check_touch_debounced(self.hw.touch_right, 'right'):
-            return False
-
-        if self.mode == SaberConfig.STATE_OFF:
-            print("POWER ON - theme {}".format(self.theme_index))
-            self.audio.reinit()  # Fresh AudioOut prevents playback issues
-            self._transition_to_state(SaberConfig.STATE_TRANSITION)
-            self._animate_power("on", duration=SaberConfig.POWER_ON_DURATION, reverse=False)
-            self.audio.play_audio_clip(self.theme_index, "idle", loop=True)
-            self._transition_to_state(SaberConfig.STATE_IDLE)
-            self.event_start_time = time.monotonic()
-        else:
-            print("POWER OFF - theme {}".format(self.theme_index))
-            self._transition_to_state(SaberConfig.STATE_TRANSITION)
-            self.audio.start_fade_out()
-            while not self.audio.update_fade():
-                self._feed_watchdog()
-                time.sleep(0.01)
-            self._animate_power("off", duration=SaberConfig.POWER_OFF_DURATION, reverse=True)
-            self._transition_to_state(SaberConfig.STATE_OFF)
-            self.event_start_time = time.monotonic()
-
-        self._wait_for_touch_release(self.hw.touch_right, 'right')
-        return True
-
-    def _read_acceleration_delta(self):
-        """Read accelerometer and calculate delta from previous reading.
-
-        Returns (delta_mag², delta_x, delta_y, delta_z, raw_x, raw_y, raw_z) or None.
-        Delta-based detection ignores gravity since it measures CHANGE in acceleration.
-        """
-        if not self.accel_enabled or not self.hw.accel:
-            return None
-
-        try:
-            accel_x, accel_y, accel_z = self.hw.accel.acceleration
-
-            # Calculate delta (change from previous reading)
-            delta_x = accel_x - self.prev_accel[0]
-            delta_y = accel_y - self.prev_accel[1]
-            delta_z = accel_z - self.prev_accel[2]
-            delta_mag_sq = delta_x**2 + delta_y**2 + delta_z**2
-
-            # Store current as previous for next iteration
-            self.prev_accel = (accel_x, accel_y, accel_z)
-
-            self.accel_error_count = 0
-            return (delta_mag_sq, delta_x, delta_y, delta_z, accel_x, accel_y, accel_z)
-        except Exception as e:
-            self.accel_error_count += 1
-            if self.accel_error_count >= UserConfig.MAX_ACCEL_ERRORS:
-                print("Accelerometer disabled after {} errors".format(self.accel_error_count))
-                self.accel_enabled = False
-                self.accel_disabled_time = time.monotonic()
-            elif self.accel_error_count % 5 == 0:
-                print("Accel error {} of {}: {}".format(
-                    self.accel_error_count, UserConfig.MAX_ACCEL_ERRORS, e))
-            time.sleep(UserConfig.ERROR_RECOVERY_DELAY)
-            return None
-
-    def _try_recover_accelerometer(self):
-        """Periodically attempt to recover disabled accelerometer."""
-        if self.accel_enabled:
-            return True
-        now = time.monotonic()
-        if now - self.last_accel_recovery_attempt < UserConfig.ACCEL_RECOVERY_INTERVAL:
-            return False
-        self.last_accel_recovery_attempt = now
-        print("Attempting accelerometer recovery...")
-        if self.hw.try_reinit_accel():
-            self.accel_enabled = True
-            self.accel_error_count = 0
-            print("Accelerometer recovered!")
-            return True
-        return False
-
-    def _handle_motion_detection(self):
-        """Detect swing/hit from accelerometer using delta (change in acceleration)."""
-        if self.mode != SaberConfig.STATE_IDLE:
-            return False
-
-        accel_data = self._read_acceleration_delta()
-        if accel_data is None:
-            return False
-
-        delta_mag_sq, delta_x, delta_y, delta_z, raw_x, raw_y, raw_z = accel_data
-        now = time.monotonic()
-
-        # Periodic output for threshold tuning (delta-based, rest ~0)
-        if UserConfig.ENABLE_DIAGNOSTICS:
-            if now - self.last_accel_output >= UserConfig.ACCEL_OUTPUT_INTERVAL:
-                self.last_accel_output = now
-                print("delta: {:.1f} (swing>{} hit>{})".format(
-                    delta_mag_sq,
-                    UserConfig.SWING_THRESHOLD,
-                    UserConfig.HIT_THRESHOLD))
-
-        if delta_mag_sq > UserConfig.HIT_THRESHOLD:
-            print(">>> HIT: {:.1f}".format(delta_mag_sq))
-            self._transition_to_state(SaberConfig.STATE_TRANSITION)
-            self.audio.start_fade_out()
-            while not self.audio.update_fade():
-                self._feed_watchdog()
-                time.sleep(0.01)
-            self.audio.play_audio_clip(self.theme_index, "hit")
-            self.color_active = self.color_hit
-            # Set event time AFTER fade completes so animation starts fresh
-            self.event_start_time = time.monotonic()
-            self.last_led_update = 0  # Force immediate LED update
-            self._transition_to_state(SaberConfig.STATE_HIT)
-            return True
-
-        elif delta_mag_sq > UserConfig.SWING_THRESHOLD:
-            print(">> SWING: {:.1f}".format(delta_mag_sq))
-            self._transition_to_state(SaberConfig.STATE_TRANSITION)
-            self.audio.start_fade_out()
-            while not self.audio.update_fade():
-                self._feed_watchdog()
-                time.sleep(0.01)
-            self.audio.play_audio_clip(self.theme_index, "swing")
-            self.color_active = self.color_swing
-            # Set event time AFTER fade completes so animation starts fresh
-            self.event_start_time = time.monotonic()
-            self.last_led_update = 0  # Force immediate LED update
-            self._transition_to_state(SaberConfig.STATE_SWING)
-            return True
-
-        return False
-
-    def _update_swing_hit_animation(self):
-        """Blend colors during swing/hit animation.
-
-        Works with or without audio files:
-        - With audio: animation runs while audio plays
-        - Without audio: uses fallback duration timers
-        """
-        if self.mode not in (SaberConfig.STATE_SWING, SaberConfig.STATE_HIT):
-            return
-
-        elapsed = time.monotonic() - self.event_start_time
-        audio_playing = self.audio.audio and self.audio.audio.playing
-
-        # Determine if animation should continue (audio playing OR within fallback duration)
-        if self.mode == SaberConfig.STATE_SWING:
-            fallback_duration = SaberConfig.SWING_DURATION_NO_AUDIO
-            blend = min(elapsed * 2.0, 1.0)  # 0.5 second blend
-        else:
-            fallback_duration = SaberConfig.HIT_DURATION_NO_AUDIO
-            blend = min(elapsed, 1.0)  # 1 second blend
-
-        # Continue animation if audio playing OR still within fallback time
-        if audio_playing or elapsed < fallback_duration:
-            self._fill_blend(self.color_active, self.color_idle, blend)
-        else:
-            # Animation done - return to idle
-            self.audio.play_audio_clip(self.theme_index, "idle", loop=True)
-            if self.hw.strip:
-                try:
-                    self.hw.strip.fill(self.color_idle)
-                    self.hw.strip.show()
-                    self.last_color = self.color_idle
-                except Exception as e:
-                    print("Strip update error:", e)
-            self._transition_to_state(SaberConfig.STATE_IDLE)
-
-    def _fill_blend(self, c1, c2, ratio):
-        """Fill strip with blended color (rate-limited to prevent audio lag)."""
-        if not self.hw.strip:
-            return
-        # Rate limit LED updates to prevent blocking audio DMA
-        now = time.monotonic()
-        if now - self.last_led_update < UserConfig.LED_UPDATE_INTERVAL:
-            return  # Skip this update, too soon
-        ratio = max(0, min(ratio, 1.0))
-        color = self._mix_colors(c1, c2, ratio)
-        if color != self.last_color:
-            try:
+            for _ in range(flashes):
+                self.hw.feed_watchdog()
                 self.hw.strip.fill(color)
                 self.hw.strip.show()
-                self.last_color = color
-                self.last_led_update = now
-            except Exception as e:
-                print("Strip blend error:", e)
-
-    def _mix_colors(self, color1, color2, w2):
-        """Linear interpolation between two RGBW colors."""
-        w2 = max(0.0, min(w2, 1.0))
-        w1 = 1.0 - w2
-        return (
-            int(color1[0] * w1 + color2[0] * w2),
-            int(color1[1] * w1 + color2[1] * w2),
-            int(color1[2] * w1 + color2[2] * w2),
-            int(color1[3] * w1 + color2[3] * w2),
-        )
-
-    def _update_strip_brightness(self):
-        """Adjust brightness based on state (uses current preset for active)."""
-        if not self.hw.strip:
-            return
-        try:
-            target = UserConfig.NEOPIXEL_IDLE_BRIGHTNESS if \
-                self.mode == SaberConfig.STATE_IDLE else \
-                self.current_brightness
-            if self.hw.strip.brightness != target:
-                self.hw.strip.brightness = target
-        except Exception as e:
-            print("Brightness error:", e)
-
-    def _update_onboard_pixels(self):
-        """Update the 4 onboard NeoPixels with slick state-based effects."""
-        if not self.hw.onboard:
-            return
-
-        try:
-            now = time.monotonic()
-            n = SaberConfig.ONBOARD_PIXELS
-
-            if self.mode == SaberConfig.STATE_OFF:
-                # Dark when off
-                self.hw.onboard.fill(0)
-
-            elif self.mode == SaberConfig.STATE_IDLE:
-                # Gentle breathing pulse in theme color
-                # Sine wave pulse: 0.3 to 1.0 brightness over 2 seconds
-                pulse = 0.65 + 0.35 * math.sin(now * math.pi)  # 0.3 to 1.0
-                r = int(self.color_idle[0] * pulse)
-                g = int(self.color_idle[1] * pulse)
-                b = int(self.color_idle[2] * pulse)
-                self.hw.onboard.fill((r, g, b))
-
-            elif self.mode == SaberConfig.STATE_SWING:
-                # Spinning chase effect in swing color
-                elapsed = now - self.event_start_time
-                pos = int(elapsed * 12) % n  # Spin ~3 times per second
-                for i in range(n):
-                    if i == pos:
-                        self.hw.onboard[i] = self.color_swing[:3]  # RGB only
-                    else:
-                        # Dim trail
-                        dist = (pos - i) % n
-                        fade = max(0, 1.0 - dist * 0.4)
-                        r = int(self.color_swing[0] * fade * 0.3)
-                        g = int(self.color_swing[1] * fade * 0.3)
-                        b = int(self.color_swing[2] * fade * 0.3)
-                        self.hw.onboard[i] = (r, g, b)
-
-            elif self.mode == SaberConfig.STATE_HIT:
-                # Bright white flash that fades to hit color
-                elapsed = now - self.event_start_time
-                if elapsed < 0.1:
-                    # Initial white flash
-                    self.hw.onboard.fill((255, 255, 255))
-                else:
-                    # Fade from hit color to idle
-                    fade = min((elapsed - 0.1) * 2, 1.0)
-                    r = int(self.color_hit[0] * (1 - fade) + self.color_idle[0] * fade)
-                    g = int(self.color_hit[1] * (1 - fade) + self.color_idle[1] * fade)
-                    b = int(self.color_hit[2] * (1 - fade) + self.color_idle[2] * fade)
-                    self.hw.onboard.fill((r, g, b))
-
-            elif self.mode == SaberConfig.STATE_TRANSITION:
-                # Quick spinner during power on/off
-                pos = int(now * 8) % n
-                for i in range(n):
-                    if i == pos:
-                        self.hw.onboard[i] = self.color_swing[:3]
-                    else:
-                        self.hw.onboard[i] = (0, 0, 0)
-
-            self.hw.onboard.show()
-        except Exception as e:
-            print("Onboard pixel error:", e)
-
-    def _periodic_maintenance(self):
-        """Run maintenance: GC, battery check, accel recovery."""
-        now = time.monotonic()
-
-        # Critical memory check
-        try:
-            mem_free = gc.mem_free()
-            if mem_free < UserConfig.CRITICAL_MEMORY_THRESHOLD:
-                gc.collect()
-                if UserConfig.ENABLE_DIAGNOSTICS:
-                    print("CRITICAL GC: {} -> {} bytes".format(mem_free, gc.mem_free()))
+                time.sleep(0.12)
+                self.hw.strip.fill(0)
+                self.hw.strip.show()
+                time.sleep(0.12)
         except Exception:
             pass
 
-        # Regular GC when idle
-        if self.mode in (SaberConfig.STATE_OFF, SaberConfig.STATE_IDLE):
-            if now - self.last_gc_time > UserConfig.GC_INTERVAL:
-                gc.collect()
-                self.last_gc_time = now
-                if UserConfig.ENABLE_DIAGNOSTICS:
-                    print("GC: {} bytes free".format(gc.mem_free()))
-
-        # Battery monitoring
-        if now - self.last_battery_check > UserConfig.BATTERY_CHECK_INTERVAL:
-            battery = self._get_battery_percentage()
-            self.last_battery_check = now
-            if UserConfig.ENABLE_DIAGNOSTICS:
-                print("Battery: {}".format(battery))
-
-            if battery != "USB" and isinstance(battery, int):
-                if battery <= UserConfig.BATTERY_CRITICAL_THRESHOLD:
-                    if now - self.last_battery_warning > UserConfig.BATTERY_WARNING_INTERVAL:
-                        self._battery_critical_warning()
-                        self.last_battery_warning = now
-                elif battery <= UserConfig.BATTERY_WARNING_THRESHOLD:
-                    if now - self.last_battery_warning > UserConfig.BATTERY_WARNING_INTERVAL:
-                        self._battery_low_warning()
-                        self.last_battery_warning = now
-
-        # Accelerometer recovery
-        if not self.accel_enabled:
-            self._try_recover_accelerometer()
-
-    def _battery_low_warning(self):
-        """Flash yellow twice for low battery warning."""
-        print("WARNING: Low battery!")
-        if self.hw.strip and self.mode == SaberConfig.STATE_OFF:
-            try:
-                for _ in range(2):
-                    self.hw.strip.fill((255, 255, 0, 0))  # RGBW yellow
-                    self.hw.strip.show()
-                    time.sleep(0.15)
-                    self.hw.strip.fill(0)
-                    self.hw.strip.show()
-                    time.sleep(0.15)
-            except Exception:
-                pass
-
-    def _battery_critical_warning(self):
-        """Flash red three times for critical battery."""
-        print("CRITICAL: Battery very low!")
-        if self.hw.strip and self.mode == SaberConfig.STATE_OFF:
-            try:
-                for _ in range(3):
-                    self.hw.strip.fill((255, 0, 0, 0))  # RGBW red
-                    self.hw.strip.show()
-                    time.sleep(0.1)
-                    self.hw.strip.fill(0)
-                    self.hw.strip.show()
-                    time.sleep(0.1)
-            except Exception:
-                pass
+    # -- main loop ------------------------------------------------------------
 
     def run(self):
-        """Main event loop."""
         print("=== SABER READY ===")
-        print("Delta thresholds: swing>{}, hit>{} (rest~0)".format(
+        print("delta thresholds: swing>{}, hit>{}".format(
             UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
-        print("Controls: RIGHT=power, LEFT=theme")
-        print("Long: RIGHT=bright, LEFT=vol, A3=vol+, A4=vol-")
+        print("RIGHT=power  LEFT=theme")
+        print("long: RIGHT=bright  LEFT=vol  A3=vol+  A4=vol-")
         print()
 
         try:
             while True:
-                self.loop_count += 1
-                self._feed_watchdog()
+                frame_start = time.monotonic()
+                self._loop_count += 1
 
-                self.audio.update_fade()
+                # 1. Watchdog — absolute first thing
+                self.hw.feed_watchdog()
 
-                if self._handle_battery_touch():
-                    continue
-                if self._handle_theme_switch():
-                    continue
-                if self._handle_power_toggle():
-                    continue
+                # 2. Audio housekeeping (close finished files)
+                self.audio.poll()
 
-                self._handle_motion_detection()
-                self._update_swing_hit_animation()
-                self._update_onboard_pixels()
-                self.display.update_display()
-                self.audio.check_audio_done()
-                self._update_strip_brightness()
-                self._periodic_maintenance()
+                # 3. Read all inputs (non-blocking edge detection)
+                self.input.poll()
 
-                if self.mode == SaberConfig.STATE_IDLE:
-                    time.sleep(UserConfig.IDLE_LOOP_DELAY)
-                else:
-                    time.sleep(UserConfig.ACTIVE_LOOP_DELAY)
+                # 4. Handle input actions
+                self._handle_inputs()
+
+                # 5. State-specific updates (motion, LED, animation)
+                now = time.monotonic()
+                self._update_state(now)
+
+                # 6. Flush any rate-limited LED writes that were deferred
+                self.led.flush_if_dirty(now)
+
+                # 7. Display timeout
+                self.display.poll()
+
+                # 8. Periodic maintenance
+                self._maintenance(now)
+
+                # 9. Adaptive sleep — hold frame cadence steady
+                elapsed = time.monotonic() - frame_start
+                remaining = FRAME_PERIOD - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
 
         except KeyboardInterrupt:
             print("\nShutdown...")
             self.cleanup()
         except MemoryError as e:
-            print("\nMEMORY ERROR:", e)
+            print("\nMEM:", e)
             gc.collect()
-            print("Recovery: {} bytes free".format(gc.mem_free()))
+            print("recovered: {} free".format(gc.mem_free()))
         except Exception as e:
             print("\nFATAL:", e)
             self.cleanup()
             raise
 
     def cleanup(self):
-        """Clean up all resources."""
-        print("Cleaning up...")
-        if self.watchdog is not None:
-            try:
-                self.watchdog.mode = None
-                print("  Watchdog disabled")
-            except Exception:
-                pass
+        print("cleanup...")
         try:
             self.audio.cleanup()
+        except Exception:
+            pass
+        try:
             self.display.cleanup()
+        except Exception:
+            pass
+        try:
             self.hw.cleanup()
-            print("Cleanup complete.")
-        except Exception as e:
-            print("Cleanup error:", e)
+        except Exception:
+            pass
+        print("done.")
 
 
 # =============================================================================
@@ -1720,14 +1538,14 @@ class SaberController:
 # =============================================================================
 
 def main():
-    controller = None
+    ctrl = None
     try:
-        controller = SaberController()
-        controller.run()
+        ctrl = SaberController()
+        ctrl.run()
     except Exception as e:
         print("\nFATAL:", e)
-        if controller:
-            controller.cleanup()
+        if ctrl:
+            ctrl.cleanup()
         raise
 
 
