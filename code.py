@@ -494,32 +494,38 @@ class Hardware:
 # recovery, never called during normal power on/off.
 
 class AudioEngine:
-    """Continuous-DMA audio — gapless transitions, real volume control."""
+    """Audio with mixer for gapless playback, direct-AudioOut fallback.
+
+    Two modes:
+      MIXER  — audiomixer.Mixer fed to AudioOut.  Gapless transitions,
+               real volume via voice level.  DMA never restarts.
+      DIRECT — AudioOut.play(wav) like the original firmware.  Gaps
+               between clips but guaranteed to work on any CircuitPython.
+
+    If mixer init fails for any reason, we silently fall back to direct.
+    """
 
     def __init__(self, speaker_enable):
         self._speaker_enable = speaker_enable
-        self._audio = None       # audioio.AudioOut — DAC output
-        self._mixer = None       # audiomixer.Mixer — software mix + volume
-        self._wave_file = None   # current open file handle
-        self._wav = None         # current audiocore.WaveFile
+        self._audio = None       # audioio.AudioOut
+        self._mixer = None       # audiomixer.Mixer (None = direct mode)
+        self._wave_file = None   # open file handle for current clip
+        self._wav = None         # audiocore.WaveFile for current clip
         self.volume = UserConfig.DEFAULT_VOLUME
         self.volume_preset_index = 1
 
-        # Detect WAV format from existing files (matches mixer to content)
-        self._sample_rate, self._bits, self._channels, self._signed = (
-            self._detect_format()
-        )
-
-        # Enable amplifier — leave on to avoid enable/disable pops
+        # Enable amplifier first — leave on to avoid pops
         if self._speaker_enable:
-            self._speaker_enable.value = True
+            try:
+                self._speaker_enable.value = True
+            except Exception:
+                pass
 
         self._init_chain()
 
-    # -- format detection -----------------------------------------------------
+    # -- chain setup ----------------------------------------------------------
 
-    @staticmethod
-    def _detect_format():
+    def _detect_format(self):
         """Probe first available WAV to configure mixer format."""
         for i in range(len(UserConfig.THEMES)):
             for name in ("idle", "on", "swing"):
@@ -529,57 +535,59 @@ class AudioEngine:
                     sr = w.sample_rate
                     bits = w.bits_per_sample
                     ch = w.channel_count
-                    signed = bits == 16  # WAV: 8-bit=unsigned, 16-bit=signed
+                    signed = bits == 16
                     f.close()
                     quality = "OK" if bits >= 16 and sr >= 22050 else "LOW"
-                    print("WAV: {}Hz {}bit {}ch [{}]".format(sr, bits, ch, quality))
+                    print("WAV: {}Hz {}bit {}ch [{}]".format(
+                        sr, bits, ch, quality))
                     if quality == "LOW":
-                        print("  upgrade to 16-bit 22050Hz for best quality")
-                        print("  sox in.wav -b 16 -r 22050 -c 1 out.wav")
+                        print("  upgrade: sox in.wav -b 16 -r 22050 -c 1 out.wav")
                     return sr, bits, ch, signed
                 except Exception:
                     continue
-        print("WAV: no files found, default 22050Hz/16bit")
         return 22050, 16, 1, True
 
-    # -- chain management -----------------------------------------------------
-
     def _init_chain(self):
-        """Build: Mixer → AudioOut(DAC) → Class D amp → speaker.
+        """Try mixer mode, fall back to direct AudioOut if anything fails."""
 
-        Mixer starts immediately and runs until cleanup().  DMA never
-        restarts during normal operation.
-        """
+        # --- attempt 1: mixer mode ---
+        sr, bits, ch, signed = self._detect_format()
         try:
-            self._mixer = audiomixer.Mixer(
+            mixer = audiomixer.Mixer(
                 voice_count=1,
-                sample_rate=self._sample_rate,
-                channel_count=self._channels,
-                bits_per_sample=self._bits,
-                samples_signed=self._signed,
+                sample_rate=sr,
+                channel_count=ch,
+                bits_per_sample=bits,
+                samples_signed=signed,
                 buffer_size=HWConfig.MIXER_BUFFER_SIZE,
             )
-
-            self._audio = audioio.AudioOut(
-                board.SPEAKER,
-                quiescent_value=0x8000 if self._signed else 0x80,
-            )
-
-            # Start mixer — runs continuously until shutdown
-            self._audio.play(self._mixer)
-
-            # Apply initial volume
+            audio = audioio.AudioOut(board.SPEAKER)
+            audio.play(mixer)
+            self._mixer = mixer
+            self._audio = audio
             self._apply_volume()
-
-            print("Audio: mixer running ({}Hz {}bit buf={}B)".format(
-                self._sample_rate, self._bits, HWConfig.MIXER_BUFFER_SIZE))
+            print("Audio: mixer ({}Hz {}bit)".format(sr, bits))
+            return
         except Exception as e:
-            print("Audio init FAIL:", e)
+            print("Mixer failed: {} — falling back to direct".format(e))
+            # clean up partial init
+            try:
+                audio.deinit()  # noqa: F821
+            except Exception:
+                pass
+
+        # --- attempt 2: direct AudioOut (always worked before) ---
+        try:
+            self._audio = audioio.AudioOut(board.SPEAKER)
+            self._mixer = None
+            print("Audio: direct DAC (no mixer)")
+        except Exception as e:
+            print("Audio FAIL: {}".format(e))
             self._audio = None
             self._mixer = None
 
     def _apply_volume(self):
-        """Push current volume to mixer output."""
+        """Push volume to mixer voice level (mixer mode only)."""
         if self._mixer is not None:
             try:
                 self._mixer.voice[0].level = self.volume / 100.0
@@ -599,7 +607,7 @@ class AudioEngine:
     # -- public API -----------------------------------------------------------
 
     def reinit(self):
-        """Full chain teardown + rebuild.  Error recovery only."""
+        """Full teardown + rebuild.  Error recovery only."""
         self.stop()
         if self._audio is not None:
             try:
@@ -613,16 +621,19 @@ class AudioEngine:
         self._init_chain()
 
     def play(self, theme_index, name, loop=False):
-        """Play sounds/{theme_index}{name}.wav on mixer voice 0.
-
-        Seamlessly replaces current clip — no DMA restart, no gap, no pop.
-        """
-        if self._mixer is None:
+        """Play sounds/{theme_index}{name}.wav.  Returns True on success."""
+        if self._audio is None:
             return False
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
 
-        # Open new file before touching old one
+        if self._mixer is not None:
+            return self._play_mixer(filename, loop)
+        else:
+            return self._play_direct(filename, loop)
+
+    def _play_mixer(self, filename, loop):
+        """Mixer mode: open new file, atomically switch voice."""
         try:
             new_file = open(filename, "rb")
         except OSError:
@@ -638,7 +649,6 @@ class AudioEngine:
                 pass
             return False
 
-        # Atomically switch voice to new clip
         try:
             self._mixer.voice[0].play(new_wav, loop=loop)
         except Exception as e:
@@ -649,26 +659,63 @@ class AudioEngine:
                 pass
             return False
 
-        # Voice has switched — safe to release old file
+        # Voice switched — release old file
         self._close_file()
         self._wave_file = new_file
         self._wav = new_wav
         return True
 
-    @property
-    def playing(self):
-        if self._mixer is None:
-            return False
+    def _play_direct(self, filename, loop):
+        """Direct mode: stop → close → open → play (classic approach)."""
         try:
-            return self._mixer.voice[0].playing
+            self._audio.stop()
         except Exception:
+            pass
+        self._close_file()
+
+        try:
+            self._wave_file = open(filename, "rb")
+            self._wav = audiocore.WaveFile(self._wave_file)
+        except OSError:
+            self._close_file()
+            return False
+        except Exception as e:
+            print("wav err:", e)
+            self._close_file()
             return False
 
+        try:
+            self._audio.play(self._wav, loop=loop)
+            return True
+        except Exception as e:
+            print("play err:", e)
+            self._close_file()
+            return False
+
+    @property
+    def playing(self):
+        if self._mixer is not None:
+            try:
+                return self._mixer.voice[0].playing
+            except Exception:
+                return False
+        if self._audio is not None:
+            try:
+                return self._audio.playing
+            except Exception:
+                return False
+        return False
+
     def stop(self):
-        """Stop voice playback.  Mixer continues outputting silence."""
+        """Stop current playback."""
         if self._mixer is not None:
             try:
                 self._mixer.voice[0].stop()
+            except Exception:
+                pass
+        elif self._audio is not None:
+            try:
+                self._audio.stop()
             except Exception:
                 pass
         self._close_file()
@@ -687,7 +734,7 @@ class AudioEngine:
             self._speaker_enable.value = True
 
     def set_volume(self, pct):
-        """Set volume 10-100%.  Applies immediately to mixer output."""
+        """Set volume 10-100%.  Applies to mixer if available."""
         self.volume = max(UserConfig.MIN_VOLUME, min(pct, UserConfig.MAX_VOLUME))
         self._apply_volume()
         print("Volume: {}%".format(self.volume))
