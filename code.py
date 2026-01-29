@@ -162,7 +162,7 @@ class HWConfig:
     IDLE_COLOR_DIVISOR = 4
 
     # Audio (mixer buffer in bytes — ~93ms at 22050Hz/16-bit)
-    MIXER_BUFFER_SIZE = 4096
+    MIXER_BUFFER_SIZE = 2048
 
 
     # Battery ADC
@@ -816,7 +816,7 @@ class Display:
         self._timeout = UserConfig.DISPLAY_TIMEOUT
 
         try:
-            board.DISPLAY.auto_refresh = True
+            board.DISPLAY.auto_refresh = False
             board.DISPLAY.brightness = 0
         except Exception:
             pass
@@ -854,6 +854,7 @@ class Display:
                 self._group.append(grp)
             board.DISPLAY.root_group = self._group
             board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
+            board.DISPLAY.refresh()
             self._start = time.monotonic()
             self._timeout = UserConfig.DISPLAY_TIMEOUT
             self._active = True
