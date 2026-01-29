@@ -162,7 +162,7 @@ class HWConfig:
 
     # Audio (mixer buffer in bytes — ~93ms at 22050Hz/16-bit)
     MIXER_BUFFER_SIZE = 4096
-    WAV_READ_BUFFER = 2048
+
 
     # Battery ADC
     BATTERY_VOLTAGE_SAMPLES = 10
@@ -629,8 +629,7 @@ class AudioEngine:
             return False
 
         try:
-            new_wav = audiocore.WaveFile(
-                new_file, buffer_size=HWConfig.WAV_READ_BUFFER)
+            new_wav = audiocore.WaveFile(new_file)
         except Exception as e:
             print("wav err:", e)
             try:
