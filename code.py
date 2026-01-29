@@ -633,7 +633,20 @@ class AudioEngine:
             return self._play_direct(filename, loop)
 
     def _play_mixer(self, filename, loop):
-        """Mixer mode: open new file, atomically switch voice."""
+        """Mixer mode: stop current voice, settle DMA, then play new clip."""
+        # Stop current voice and release old file BEFORE opening new one.
+        # The DMA may still be draining its buffer after voice[0].playing
+        # goes False, so we must explicitly stop, close, wait for the DMA
+        # to settle, and gc.collect to free the old buffer — otherwise the
+        # DMA reads stale/freed memory and produces audio artifacts.
+        try:
+            self._mixer.voice[0].stop()
+        except Exception:
+            pass
+        self._close_file()
+        time.sleep(0.03)          # 30 ms — let DMA fully drain
+        gc.collect()              # reclaim old WAV buffer memory
+
         try:
             new_file = open(filename, "rb")
         except OSError:
@@ -659,8 +672,6 @@ class AudioEngine:
                 pass
             return False
 
-        # Voice switched — release old file
-        self._close_file()
         self._wave_file = new_file
         self._wav = new_wav
         return True
