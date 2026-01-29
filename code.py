@@ -34,10 +34,11 @@ import touchio
 import analogio
 import supervisor
 import displayio
-import terminalio
 import microcontroller
 from digitalio import DigitalInOut
-from adafruit_display_text import label
+# NOTE: terminalio and adafruit_display_text are lazy-imported inside
+# Display._show_bar() to keep ~3 KB of bytecode off the heap at boot.
+# They are only needed for the occasional status-bar overlay.
 
 try:
     from watchdog import WatchDogMode
@@ -56,15 +57,6 @@ ANIM_LIGHTNING = 2
 ANIM_PULSE = 3
 ANIM_FIRE = 4
 ANIM_SPARKLE = 5
-
-_ANIM_NAMES = {
-    ANIM_BREATHE: "breathe",
-    ANIM_SPIN: "spin",
-    ANIM_LIGHTNING: "lightning",
-    ANIM_PULSE: "pulse",
-    ANIM_FIRE: "fire",
-    ANIM_SPARKLE: "sparkle",
-}
 
 
 # =============================================================================
@@ -218,13 +210,13 @@ _STATE_NAMES = {
 
 # Allowed transitions (from -> set of legal destinations)
 _VALID_TRANSITIONS = {
-    STATE_OFF:       {STATE_POWER_ON, STATE_ERROR},
-    STATE_IDLE:      {STATE_SWING, STATE_HIT, STATE_POWER_OFF, STATE_ERROR},
-    STATE_SWING:     {STATE_IDLE, STATE_POWER_OFF, STATE_ERROR},
-    STATE_HIT:       {STATE_IDLE, STATE_POWER_OFF, STATE_ERROR},
-    STATE_POWER_ON:  {STATE_IDLE, STATE_ERROR},
-    STATE_POWER_OFF: {STATE_OFF, STATE_ERROR},
-    STATE_ERROR:     {STATE_OFF},
+    STATE_OFF:       (STATE_POWER_ON, STATE_ERROR),
+    STATE_IDLE:      (STATE_SWING, STATE_HIT, STATE_POWER_OFF, STATE_ERROR),
+    STATE_SWING:     (STATE_IDLE, STATE_POWER_OFF, STATE_ERROR),
+    STATE_HIT:       (STATE_IDLE, STATE_POWER_OFF, STATE_ERROR),
+    STATE_POWER_ON:  (STATE_IDLE, STATE_ERROR),
+    STATE_POWER_OFF: (STATE_OFF, STATE_ERROR),
+    STATE_ERROR:     (STATE_OFF,),
 }
 
 
@@ -509,7 +501,7 @@ class AudioEngine:
         self._speaker_enable = speaker_enable
         self._audio = None       # audioio.AudioOut
         self._mixer = None       # audiomixer.Mixer (None = direct mode)
-        self._audio_buf = bytearray(512)  # shared WaveFile read buffer — never freed
+        self._audio_buf = None             # allocated in _init_chain after gc
         self._wave_file = None   # open file handle for current clip
         self._wav = None         # audiocore.WaveFile for current clip
         self.volume = UserConfig.DEFAULT_VOLUME
@@ -555,9 +547,13 @@ class AudioEngine:
         # --- attempt 1: mixer mode ---
         sr, bits, ch, signed = self._detect_format()
 
-        # Free the probe WaveFile + buffer left over from _detect_format()
-        # before allocating the mixer (4096-byte buffer).
+        # Compact heap before the big allocations (buffer + mixer).
         gc.collect()
+
+        # Allocate shared WaveFile read-buffer once (survives reinit).
+        if self._audio_buf is None:
+            self._audio_buf = bytearray(512)
+
         try:
             mixer = audiomixer.Mixer(
                 voice_count=1,
@@ -818,6 +814,8 @@ class Display:
 
     def _show_bar(self, title, value, color, bar_w=None):
         try:
+            import terminalio
+            from adafruit_display_text import label
             self._clear_group()
             self._group.append(
                 label.Label(terminalio.FONT, text=title, scale=2, color=color, x=10, y=30))
@@ -1449,8 +1447,17 @@ class SaberController:
 
     def __init__(self):
         print("\n=== SwingSaber v3.0 ===")
+        gc.collect()
+        print("boot mem: {} free".format(gc.mem_free()))
+
         self.hw = Hardware()
+        gc.collect()
+        print("post-hw mem: {} free".format(gc.mem_free()))
+
         self.audio = AudioEngine(self.hw.speaker_enable)
+        gc.collect()
+        print("post-audio mem: {} free".format(gc.mem_free()))
+
         self.display = Display(self.hw.read_battery_pct)
         self.input = InputManager(self.hw)
         self.motion = MotionEngine(self.hw)
@@ -1906,6 +1913,9 @@ class SaberController:
 # =============================================================================
 
 def main():
+    gc.collect()
+    print("pre-boot mem: {} free".format(gc.mem_free()))
+
     MAX_RESTARTS = 5
     restarts = 0
 
