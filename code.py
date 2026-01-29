@@ -555,6 +555,10 @@ class AudioEngine:
 
         # --- attempt 1: mixer mode ---
         sr, bits, ch, signed = self._detect_format()
+
+        # Free the probe WaveFile + buffer left over from _detect_format()
+        # before allocating the mixer (4096-byte buffer).
+        gc.collect()
         try:
             mixer = audiomixer.Mixer(
                 voice_count=1,
