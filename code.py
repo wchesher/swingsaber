@@ -80,7 +80,6 @@ class UserConfig:
     ACCEL_OUTPUT_INTERVAL = 0.5
 
     # -- Touch ----------------------------------------------------------------
-    TOUCH_DEBOUNCE_TIME = 0.02
     LONG_PRESS_TIME = 1.0
 
     # -- Persistent storage ---------------------------------------------------
@@ -518,8 +517,9 @@ class AudioEngine:
         if self._audio is None:
             return False
 
-        # Fastest possible transition: stop DMA → close old file → open new → play
+        # Fastest possible transition: stop DMA → close old file → gc → open new → play
         self._hard_stop()
+        gc.collect()  # free WAV buffer memory before allocating new one
 
         filename = "sounds/{}{}.wav".format(theme_index, name)
         try:
@@ -570,6 +570,7 @@ class AudioEngine:
 
     def set_volume(self, pct):
         self.volume = max(UserConfig.MIN_VOLUME, min(pct, UserConfig.MAX_VOLUME))
+        print("Volume: {}%".format(self.volume))
         return self.volume
 
     def increase_volume(self):
@@ -692,32 +693,6 @@ class Display:
         except Exception as e:
             print("img err:", e)
             return None
-
-    def show_image_blocking(self, theme_index, kind="logo", duration=None):
-        """Show image with speaker muted (for theme switch while off)."""
-        if duration is None:
-            duration = HWConfig.IMAGE_DISPLAY_DURATION
-        if self._audio:
-            self._audio.mute()
-        try:
-            self._clear_group()
-            img = self._load_image(theme_index, kind)
-            if img:
-                self._group.append(img)
-                board.DISPLAY.root_group = self._group
-                board.DISPLAY.brightness = UserConfig.DISPLAY_BRIGHTNESS
-                board.DISPLAY.refresh()
-                time.sleep(duration)
-                self._clear_group()
-                board.DISPLAY.root_group = self._group
-                board.DISPLAY.brightness = 0
-            self._start = time.monotonic()
-            self._active = True
-        except Exception as e:
-            print("img show err:", e)
-        finally:
-            if self._audio:
-                self._audio.unmute()
 
     def show_image_async(self, theme_index, kind="logo", duration=None):
         """Show image without blocking — auto-clears via poll()."""
@@ -887,6 +862,9 @@ class MotionEngine:
                 self._disabled_time = now
             elif self._error_count % 5 == 0:
                 print("accel err {}: {}".format(self._error_count, e))
+            # Delay after error to prevent rapid-fire failures from disabling
+            # the accelerometer within a single frame
+            time.sleep(0.01)
             return None
 
     def try_recover(self, now):
@@ -928,6 +906,7 @@ class LEDEngine:
         self._hw = hw
         self._last_strip_update = 0
         self._last_strip_color = None
+        self._pending_color = None    # color deferred by rate limiting
         self._strip_dirty = False
 
     # -- color helpers --------------------------------------------------------
@@ -958,6 +937,7 @@ class LEDEngine:
         if color == self._last_strip_color:
             return  # no change
         if now - self._last_strip_update < LED_MIN_INTERVAL:
+            self._pending_color = color
             self._strip_dirty = True
             return  # too soon — will catch on next frame
         try:
@@ -966,6 +946,7 @@ class LEDEngine:
             self._last_strip_color = color
             self._last_strip_update = now
             self._strip_dirty = False
+            self._pending_color = None
         except Exception as e:
             print("strip err:", e)
 
@@ -1012,9 +993,10 @@ class LEDEngine:
 
     def flush_if_dirty(self, now):
         """If a rate-limited write was skipped, flush the pending color."""
-        if self._strip_dirty and self._last_strip_color is not None:
+        if self._strip_dirty and self._pending_color is not None:
             if now - self._last_strip_update >= LED_MIN_INTERVAL:
-                self.strip_fill_force(self._last_strip_color)
+                self.strip_fill_force(self._pending_color)
+                self._pending_color = None
 
     # -- onboard pixels -------------------------------------------------------
 
@@ -1176,7 +1158,9 @@ class SaberController:
         if self.hw.strip:
             self.hw.strip.brightness = self.brightness
             self.hw.strip.show()
-        return int(self.brightness * 100)
+        pct = int(self.brightness * 100)
+        print("Brightness: {}%".format(pct))
+        return pct
 
     # -- state transitions ----------------------------------------------------
 
@@ -1334,8 +1318,8 @@ class SaberController:
         """Run state-specific logic once per frame."""
 
         if self.state == STATE_OFF:
-            # Nothing to do — low power idle
-            pass
+            # Ensure LEDs stay dark (covers boot, error recovery, missed cleanup)
+            self.led.onboard_off()
 
         elif self.state == STATE_IDLE:
             # Set idle brightness
