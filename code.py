@@ -89,8 +89,9 @@ class UserConfig:
     SMOOTHING_FACTOR = 0.4    # EMA alpha (0-1): higher = more responsive
 
     # -- Brightness -----------------------------------------------------------
-    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35]
-    DEFAULT_BRIGHTNESS = 0.25
+    BRIGHTNESS_PRESETS = [0.15, 0.25, 0.35, 0.45]
+    BRIGHTNESS_LABELS = [25, 50, 75, 100]  # User-facing percentages
+    DEFAULT_BRIGHTNESS = 0.45
     IDLE_BRIGHTNESS = 0.05
 
     # -- Volume ---------------------------------------------------------------
@@ -269,12 +270,12 @@ class PersistentSettings:
     @staticmethod
     def load_brightness():
         if not PersistentSettings._valid():
-            return 1
+            return 3
         try:
             v = microcontroller.nvm[UserConfig.NVM_BRIGHTNESS_OFFSET]
-            return v if v < len(UserConfig.BRIGHTNESS_PRESETS) else 1
+            return v if v < len(UserConfig.BRIGHTNESS_PRESETS) else 3
         except Exception:
-            return 1
+            return 3
 
     @staticmethod
     def save_theme(idx):
@@ -1327,7 +1328,8 @@ class SaberController:
 
         self.display._off()
         print("theme={} vol={}% bright={}%".format(
-            self.theme_index, self.audio.volume, int(self.brightness * 100)))
+            self.theme_index, self.audio.volume,
+            UserConfig.BRIGHTNESS_LABELS[self.brightness_index]))
         print()
 
     # -- theme ----------------------------------------------------------------
@@ -1353,7 +1355,7 @@ class SaberController:
         if self.hw.strip:
             self.hw.strip.brightness = self.brightness
             self.hw.strip.show()
-        pct = int(self.brightness * 100)
+        pct = UserConfig.BRIGHTNESS_LABELS[self.brightness_index]
         print("Brightness: {}%".format(pct))
         return pct
 
