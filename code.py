@@ -8,11 +8,10 @@
 # Speaker: 2W 8-ohm via 1.25mm JST -> onboard Class D amplifier
 #
 # Architecture priorities:
-#   1. Audio DMA is sacred - continuous mixer, never restart DMA mid-session
-#   2. Real volume control - mixer voice level, not just a stored number
-#   3. Fixed frame timing - all visuals on a steady cadence
-#   4. Zero blocking in the main loop - everything is non-blocking
-#   5. Single point of state change - no scattered transitions
+#   1. Audio DMA is sacred - never starve it
+#   2. Fixed frame timing - all visuals on a steady cadence
+#   3. Zero blocking in the main loop - everything is non-blocking
+#   4. Single point of state change - no scattered transitions
 #
 # WAV file requirements (best quality):
 #   Format:  16-bit signed PCM, 22050 Hz, mono
@@ -93,13 +92,6 @@ class UserConfig:
     DEFAULT_BRIGHTNESS = 0.45
     IDLE_BRIGHTNESS = 0.05
 
-    # -- Volume ---------------------------------------------------------------
-    VOLUME_PRESETS = [30, 50, 70, 100]
-    DEFAULT_VOLUME = 70
-    VOLUME_STEP = 10
-    MIN_VOLUME = 10
-    MAX_VOLUME = 100
-
     # -- Display --------------------------------------------------------------
     DISPLAY_BRIGHTNESS = 0.3
     DISPLAY_TIMEOUT = 2.0
@@ -114,7 +106,6 @@ class UserConfig:
     # -- Persistent storage ---------------------------------------------------
     ENABLE_PERSISTENT_SETTINGS = True
     NVM_THEME_OFFSET = 0
-    NVM_VOLUME_OFFSET = 1
     NVM_BRIGHTNESS_OFFSET = 2
     NVM_MAGIC_OFFSET = 3
     NVM_MAGIC_VALUE = 0xAB
@@ -254,16 +245,6 @@ class PersistentSettings:
             return 0
 
     @staticmethod
-    def load_volume():
-        if not PersistentSettings._valid():
-            return UserConfig.DEFAULT_VOLUME
-        try:
-            v = microcontroller.nvm[UserConfig.NVM_VOLUME_OFFSET]
-            return v if UserConfig.MIN_VOLUME <= v <= UserConfig.MAX_VOLUME else UserConfig.DEFAULT_VOLUME
-        except Exception:
-            return UserConfig.DEFAULT_VOLUME
-
-    @staticmethod
     def load_brightness():
         if not PersistentSettings._valid():
             return 3
@@ -276,10 +257,6 @@ class PersistentSettings:
     @staticmethod
     def save_theme(idx):
         return PersistentSettings._write(UserConfig.NVM_THEME_OFFSET, idx)
-
-    @staticmethod
-    def save_volume(vol):
-        return PersistentSettings._write(UserConfig.NVM_VOLUME_OFFSET, vol)
 
     @staticmethod
     def save_brightness(idx):
@@ -483,8 +460,6 @@ class AudioEngine:
         self._audio = None
         self._wave_file = None
         self._wav = None
-        self.volume = UserConfig.DEFAULT_VOLUME
-        self.volume_preset_index = 1
 
         if self._speaker_enable:
             self._speaker_enable.value = True
@@ -590,21 +565,6 @@ class AudioEngine:
         if self._speaker_enable:
             self._speaker_enable.value = True
 
-    def set_volume(self, pct):
-        self.volume = max(UserConfig.MIN_VOLUME, min(pct, UserConfig.MAX_VOLUME))
-        print("Volume: {}%".format(self.volume))
-        return self.volume
-
-    def increase_volume(self):
-        return self.set_volume(self.volume + UserConfig.VOLUME_STEP)
-
-    def decrease_volume(self):
-        return self.set_volume(self.volume - UserConfig.VOLUME_STEP)
-
-    def cycle_volume_preset(self):
-        self.volume_preset_index = (self.volume_preset_index + 1) % len(UserConfig.VOLUME_PRESETS)
-        return self.set_volume(UserConfig.VOLUME_PRESETS[self.volume_preset_index])
-
     def cleanup(self):
         self._hard_stop()
         if self._audio is not None:
@@ -687,9 +647,6 @@ class Display:
             self._show_bar("BATTERY: USB", None, 0xFFFFFF)
         else:
             self._show_bar("BATTERY: {}%".format(b), b, 0xFFFF00)
-
-    def show_volume(self, vol):
-        self._show_bar("VOLUME: {}%".format(vol), vol, 0x00FF00)
 
     def show_brightness(self, pct):
         bar_w = max(1, min(int(pct * 2.5), 100))
@@ -1306,7 +1263,6 @@ class SaberController:
 
         # Theme / settings
         self.theme_index = PersistentSettings.load_theme()
-        self.audio.set_volume(PersistentSettings.load_volume())
         self.brightness_index = PersistentSettings.load_brightness()
         self.brightness = UserConfig.BRIGHTNESS_PRESETS[self.brightness_index]
 
@@ -1331,8 +1287,8 @@ class SaberController:
         self._loop_count = 0
 
         self.display._off()
-        print("theme={} vol={}% bright={}%".format(
-            self.theme_index, self.audio.volume,
+        print("theme={} bright={}%".format(
+            self.theme_index,
             UserConfig.BRIGHTNESS_LABELS[self.brightness_index]))
         print()
 
@@ -1458,28 +1414,12 @@ class SaberController:
     def _handle_inputs(self):
         """Process all input events.  Returns True if an action consumed this frame."""
 
-        # -- A3/A4: battery tap, volume long-press ----------------------------
-        if self.input.long_press("a3"):
-            vol = self.audio.increase_volume()
-            PersistentSettings.save_volume(vol)
-            self.display.show_volume(vol)
-            return True
-        if self.input.long_press("a4"):
-            vol = self.audio.decrease_volume()
-            PersistentSettings.save_volume(vol)
-            self.display.show_volume(vol)
-            return True
+        # -- A3/A4: battery tap -----------------------------------------------
         if self.input.tap("a3") or self.input.tap("a4"):
             self.display.show_battery()
             return True
 
-        # -- LEFT: theme tap, volume-preset long-press ------------------------
-        if self.input.long_press("left"):
-            vol = self.audio.cycle_volume_preset()
-            PersistentSettings.save_volume(vol)
-            self.display.show_volume(vol)
-            return True
-
+        # -- LEFT: theme tap --------------------------------------------------
         if self.input.tap("left"):
             if self.state == STATE_OFF:
                 self._cycle_theme()
@@ -1668,7 +1608,7 @@ class SaberController:
         print("force thresholds: swing>{:.1f} hit>{:.1f} m/s²".format(
             UserConfig.SWING_THRESHOLD, UserConfig.HIT_THRESHOLD))
         print("RIGHT=power  LEFT=theme")
-        print("long: RIGHT=bright  LEFT=vol  A3=vol+  A4=vol-")
+        print("long: RIGHT=bright")
         print()
 
         consecutive_errors = 0
